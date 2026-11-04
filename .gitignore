@@ -1,0 +1,19 @@
+# Original Denon firmware, update packages and flash dumps are Denon copyright.
+# Keep them local only; never commit or push them.
+orig/
+dumps/
+*.exe
+*.zip
+*.cab
+*.bin
+*.mot
+*.ldr
+*.bid
+
+# Build output
+build/
+*.o
+*.map
+*.lst
+
+.DS_Store

@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+*.pdf binary
+*.bin binary
+*.mot binary
+*.hex binary
+*.ldr binary
+*.exe binary
+*.zip binary
+*.bid binary
