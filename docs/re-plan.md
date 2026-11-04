@@ -204,8 +204,8 @@ Security
 
 1. DM850 CPU core: ARM (confirmed); exact core and SoC memory map still open.
 2. Updater rewrites F1, F2, F3 and F4; route MAIN→SUB→DSP and MAIN→DM850 (package header). Resident boot blocks are not in the package.
-3. DSP boot source and whether F2 can rewrite the DSP flash in the field.
-4. Whether serial I/O mode pins on F1/F2 reach accessible pads.
+3. DSP: boots from LH28F160 on its parallel port; SUB can change BOOTCFG and feed it over SPI (schematic-notes.md). Strap levels still to confirm.
+4. Serial I/O mode pins: MAIN has TP501 (unfitted) + R602/J305/J306 options; DSP has an unfitted 10-pin JTAG footprint CX502; see schematic-notes.md.
 5. Contents and purpose of `SSManage4306.EXE` and `original_AVR-4306.bid`.
 6. Availability of NC308/NC30 and VisualDSP++ versions matching the originals.
 
