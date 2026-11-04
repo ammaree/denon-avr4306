@@ -50,9 +50,11 @@ Fields are 8-character fixed-width ASCII. Confirmed meanings:
 | t, m | unknown; t = 1 (MAIN/SUB), 2 (DSP), 6 (DM850); m = 3, 00020005 (DM850 code), 00040004 (DM850 web) | |
 | MW/BP/PV | unknown flags | |
 
-**Every payload is stored bit-inverted (XOR 0xFF).** After inversion the erased-flash
-regions read 0xFF, the DM850 headers and web pages read as plain ASCII, and the DM850
-code disassembles as ARM.
+**Every payload in the 6.0.0.x updaters is stored bit-inverted (XOR 0xFF).** After
+inversion the erased-flash regions read 0xFF, the DM850 headers and web pages read as
+plain ASCII, and the DM850 code disassembles as ARM. The older FWCV recovery package
+uses the same container with **plain** payloads (checksum over raw bytes) — see
+[update-tools.md](update-tools.md).
 
 ## 3. Images
 
@@ -150,7 +152,8 @@ stamp.
 
 | Release | MAIN | SUB | DSP | DM850I | DM850W | DM850D | DM850IMG |
 |---|---|---|---|---|---|---|---|
-| 6.0.0.2 (2006-08) | 00.99 | 00.50 | 00.04 | 2006-08-01 | 2006-08-01 | 2006-05-31 | 11.22 |
+| FWCV VR002 (2006-06) | 00.76 | — | — | — | — | — | "11.22" (2005-11-22 build) |
+| 6.0.0.2 (2006-08) | 00.99 | 00.50 | 00.04 | 2006-08-01 | 2006-08-01 | 2006-05-31 | "11.22" (2006-02-07 build) |
 | 6.0.0.3 (2008-06) | same | same | same | **2008-05-27** | stamp only | same | same |
 | 6.0.0.4 (2008-10) | **01.00** | same | same | same | same | same | same |
 
@@ -186,7 +189,7 @@ firmware as a 120 V one.
 3. Decode the `bCoD` header fully (load address, checksums) and the DM850 memory map.
 4. Recover the three resident boot blocks (MAIN top 16 KB, SUB top 8 KB, DSP first
    32 KB) — not in any package; must come from the unit.
-5. Transfer protocol between the updater and the unit (from the updater's code).
+5. Transfer protocol between the updater and the unit: strings decoded in update-tools.md; framing still needs the tool's code.
 
 ## 8. Toolchain
 
