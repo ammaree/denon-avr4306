@@ -99,6 +99,15 @@ resource 351 when the module does not answer.
   reach the DM850's control port can rewrite MAIN, SUB, DSP and the CPLDs.
 - Unit discovery by Denon OUI makes targets easy to find on a LAN.
 
+## 3a. SSManage4306.EXE (2005-10-21)
+
+Settings backup/restore tool, not a firmware writer. Strings: "Backup Image Data
+(*.BID)", "Save the bakup image", "Load the backup image", "Reboot(Save mode)",
+"Reboot(Load mode)", model table `AVR-4306ASA / AVR-4306EUR / AVR-4306USA /
+AVC-4320JPN`, header parse `%4s%2s%4s` (model, region, version). It talks to the unit
+over one TCP connection (socket/htons/connect/send/recv only). `original_AVR-4306.bid`
+(`4306EU0099`) is a file this tool produced from an EU unit running MAIN 00.99.
+
 ## 4. Open items
 
 1. Disassemble the FWCV tool (x86, MFC) to recover the exact framing of `P/L/S/C/D`

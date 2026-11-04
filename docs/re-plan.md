@@ -205,7 +205,7 @@ Security
 2. Updater rewrites F1, F2, F3 and F4; route MAIN→SUB→DSP and MAIN→DM850 (package header). Resident boot blocks are not in the package.
 3. DSP: boots from LH28F160 on its parallel port; SUB can change BOOTCFG and feed it over SPI (schematic-notes.md). Strap levels still to confirm.
 4. Serial I/O mode pins: MAIN has TP501 (unfitted) + R602/J305/J306 options; DSP has an unfitted 10-pin JTAG footprint CX502; see schematic-notes.md.
-5. `original_AVR-4306.bid` = parameter backup made by the writer tool (user settings, not firmware). `SSManage4306.EXE` still unexamined.
+5. `original_AVR-4306.bid` = parameter backup made by the writer tool (user settings, not firmware). `SSManage4306.EXE` is the matching backup/restore tool (update-tools.md §3a).
 6. Availability of NC308/NC30 and VisualDSP++ versions matching the originals.
 
 ## 6. Legal
