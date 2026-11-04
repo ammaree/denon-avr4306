@@ -22,7 +22,7 @@ manual, and must be checked against the part datasheet.
 | MA IC506 | Renesas M30879FLFP (M32C/87) | Main µcom | internal flash | Service part "MAIN CPU SUB ASSY" = pre-programmed. Flash/RAM size **[verify]** |
 | DI IC251 | Renesas M30624FGPGP (M16C/62P) | Sub µcom (digital board) | internal flash | "SUB CPU SUB ASSY". 256 KB + 4 KB flash, 20 KB RAM **[verify]**. 12 MHz crystal X251 |
 | DI IC506 | ADSP-21366SKBCZ (SHARC) | Audio decode / post-processing | DI IC507 LH28F160BJE (16 Mbit parallel flash, "DSP ROM SUB ASSY") | 3 × CY7C1049 SRAM (IC508–510), 20.815 MHz FCXO |
-| DI IC905 | BCOIC-DM850-CQL | Network module (Ethernet, net audio, USB **[verify]**) | DI IC903 W19B320ABT (32 Mbit flash, "DM850 ROM SUB ASSY") | IS42S16400 SDRAM, DM9161AEP PHY, 25 MHz. CPU core **unknown** |
+| DI IC905 | BCOIC-DM850-CQL | Network module (Ethernet, net audio, web UI, telnet) | DI IC903 W19B320ABT (32 Mbit flash, "DM850 ROM SUB ASSY") | IS42S16400 SDRAM, DM9161AEP PHY, 25 MHz. BridgeCo AG DM850: ARM32 LE (ARMv5T+), GCC 3.4.0, ThreadX — see firmware-package.md |
 | DI IC751 | Genesis FLI2310 | Video deinterlacer/scaler | none listed | K4S643232 SDRAM. Config path **[verify]** (host register load expected) |
 | DI IC151 | Altera EPM570T144 (MAX II) | Main PLD | internal config flash | Non-volatile CPLD **[verify]** |
 | DI IC701 | Altera EPM570F256 (MAX II) | PLD | internal config flash | Non-volatile CPLD **[verify]** |
@@ -98,7 +98,7 @@ images in the PDF.
 - Separate network-module recovery package `FWCV_4306_VR002_SETUP` (InstallShield, 2006-06).
 - `SSManage4306.EXE` (2005) and `original_AVR-4306.bid` (8960 B, header `4306EU0099`):
   purpose not yet established; the .bid looks like a settings/parameter dump.
-- Contents of all of the above not yet analysed.
+- Package contents: see [firmware-package.md](firmware-package.md).
 
 ## Control protocol (doc Ver. 4.6a)
 

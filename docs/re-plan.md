@@ -13,7 +13,7 @@ Version 6.0.0.4 is not one binary. Per processor:
 | F1 | Main µcom M30879 | M32C/80 | internal flash | yes (via update tool, path to confirm) | 1 |
 | F2 | Sub µcom M30624 | M16C/60 | internal flash | likely | 2 |
 | F3 | DSP ADSP-21366 | SHARC | LH28F160 parallel flash | likely (sub CPU drives VPP/DSPBOOT) | 3 |
-| F4 | Network module DM850 | unknown | W19B320 flash | yes (separate recovery package exists) | 4 |
+| F4 | Network module DM850 | ARM32 LE (BridgeCo, GCC 3.4.0, ThreadX) | W19B320 flash | yes (I/W/D/IMG images in package) | 4 |
 | F5 | CPLDs EPM570 ×2, LC4064V | logic | on-chip | probably factory-only | 5 |
 | F6 | EDID EEPROMs ×3 | data | BR24L02 | runtime-written by sub CPU? | data only |
 | F7 | FLI2310 settings | data | in F1/F2 image (expected) | with host | data only |
@@ -202,8 +202,8 @@ Security
 
 ## 5. Open questions
 
-1. DM850 CPU core and SDK.
-2. Which processors the network updater actually rewrites (F1 only, or F1 relaying to F2/F3).
+1. DM850 CPU core: ARM (confirmed); exact core and SoC memory map still open.
+2. Updater rewrites F1, F2, F3 and F4; route MAIN→SUB→DSP and MAIN→DM850 (package header). Resident boot blocks are not in the package.
 3. DSP boot source and whether F2 can rewrite the DSP flash in the field.
 4. Whether serial I/O mode pins on F1/F2 reach accessible pads.
 5. Contents and purpose of `SSManage4306.EXE` and `original_AVR-4306.bid`.
