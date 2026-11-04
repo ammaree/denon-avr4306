@@ -52,17 +52,16 @@ Rough effort (estimate, single engineer, for F1 alone): image extraction and asm
 Done: local docs read, processor inventory, pin maps, boot-mode pins, service modes,
 control protocol.
 
-To do (online):
-- M32C/87 and M16C/62P hardware manuals: memory map, flash size, vector table, ID-code
-  check, standard serial I/O mode protocol, boot program area.
-- ADSP-21366 hardware reference: boot modes (BOOT_CFG), loader (.ldr) format, SPI slave boot.
+Done (see [research.md](research.md) and [schematic-notes.md](schematic-notes.md)):
+memory maps, vector/ID-code locations, serial I/O protocol, ADSP boot-mode table, DM850
+background, schematic access points.
+
+Still to do (online):
+- M32C/87 and M16C/62P hardware manuals: exact flash block maps, SFR map for annotation.
+- ADSP-2136x hardware reference + EE-177/EE-345/EE-223: loader tags and 8-bit packing
+  (analog.com unreachable from this network; use a mirror).
 - LH28F160BJE and W19B320 datasheets: command sets, sector maps, protection.
-- BCOIC-DM850: identify CPU core and SDK. Search Denon/Marantz models of the same era
-  that share it.
 - FLI2310: configuration method.
-- Community sources: AVR-4306 / AVC-4320 / AVR-4806 owner and repair forums, prior dumps.
-- Schematic pages (PDF images): find test pads/headers on CNVSS, P50, P55, UART pins,
-  DSP JTAG, DM850 JTAG/UART, CPLD JTAG.
 
 ### 1b. Image acquisition (two independent sources, cross-checked)
 

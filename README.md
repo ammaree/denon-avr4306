@@ -6,6 +6,7 @@ Reverse engineering of the Denon AVR-4306 AV receiver firmware (target version 6
 - [docs/re-plan.md](docs/re-plan.md) — reverse-engineering plan, Phase 1 and Phase 2
 - [docs/firmware-package.md](docs/firmware-package.md) — updater package format, per-processor images, ISA identification
 - [docs/schematic-notes.md](docs/schematic-notes.md) — programming paths, JTAG/serial access points, update route
+- [docs/research.md](docs/research.md) — online research: Renesas memory maps and serial protocol, ADSP boot modes, BridgeCo DM850
 - [tools/](tools/) — carving, header parsing and analysis scripts; [ref/sha256.txt](ref/sha256.txt) — image hashes
 
 Source documents (local, not in this repo):
