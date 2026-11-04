@@ -74,16 +74,24 @@ code disassembles as ARM.
   0xF7DBB1, 104 at 0xF83228. 24-bit addresses in 32-bit slots is the M32C convention.
 - No pointer tables appear in the raw (non-inverted) data, which is what showed the
   inversion.
-- Instruction-level confirmation still needs an M32C disassembler (GNU binutils
-  `m32c-elf`; not installed here).
+- **Confirmed M32C by disassembly** (GNU binutils 2.43 `m32c-elf-objdump -m m32c`,
+  see §8): functions open with `enter #n` (EC) and close with `exitd` (FC) / `rts` (DF)
+  + `nop` (DE); 16,503 of 16,890 `jsr`/`jmp` targets fall inside 0xF00000–0xFFFFFF.
+  Signature counts over the code area: 684 × `FC EC` (exitd;enter), 676 × `FC DE EC`,
+  219 × `DF DE EC`; only 4 × M16C `7C F2`. Code occupies 0xF00000–0xFA969A; the rest is
+  erased flash.
 - 00.99 → 01.00: 307,737 of 1,032,192 bytes differ, from offset 58 onward: a full rebuild,
   not a patch.
 
 ### 3.2 SUB — M16C/62P
 
 - Address range and flash size match the M30624FG (256 KB flash at 0xC0000–0xFFFFF).
-- Inverted image starts `7C F2 01 B6 ...`; `7C F2` is the M16C `ENTER #imm8` encoding
-  **[verify with disassembler]**.
+- **Confirmed M16C by disassembly** (`m32c-elf-objdump -m m16c`): the image starts
+  `enter #1; mov.b:z #0,-1[fb]; … cmp.b:s #3,-1[fb]; jgeu; shl.w; inc.b; jmp.b` — a
+  loop with FB-relative locals — and the code area holds 564 × `7C F2` (enter),
+  676 × `7D F2` (exitd), 251 × `7D F2 7C F2`, and no M32C `FC DE EC` / `DF DE EC`
+  sequences. `jsr`/`jmp` targets stay inside 0xC0000–0xFFFFF (4,358 of 4,685). Code
+  occupies 0xC0000–0xE2438.
 - Pointer tables of 4-byte entries with 20-bit values 0x0C37xx–0x0DAFxx (code area).
 - Table at 0xE15E8: `0C0000 0CFFFF 0D0000 0DFFFF 0E0000 0EFFFF ...` — flash block
   boundaries, i.e. SUB contains flash-programming code.
@@ -173,9 +181,28 @@ firmware as a 120 V one.
 
 ## 7. Open items
 
-1. Disassemble MAIN and SUB (needs `m32c-elf` binutils or an M16C/M32C Ghidra module).
+1. Full annotation of MAIN (M32C) and SUB (M16C) disassembly.
 2. Confirm the DSP boot-stream layout against the ADSP-2136x loader format.
 3. Decode the `bCoD` header fully (load address, checksums) and the DM850 memory map.
 4. Recover the three resident boot blocks (MAIN top 16 KB, SUB top 8 KB, DSP first
    32 KB) — not in any package; must come from the unit.
 5. Transfer protocol between the updater and the unit (from the updater's code).
+
+## 8. Toolchain
+
+GNU binutils 2.43 built for `m32c-elf` (M16C and M32C decoders), installed at
+`~/.local/opt/binutils-m32c-2.43/bin/`. Build on macOS needed `--with-system-zlib`,
+`--disable-werror`, `MAKEINFO=true`. Tarball signature verified against the GNU keyring.
+
+```bash
+~/.local/opt/binutils-m32c-2.43/bin/m32c-elf-objdump -D -b binary -m m16c --adjust-vma=0xC0000  SUB.inv.bin
+~/.local/opt/binutils-m32c-2.43/bin/m32c-elf-objdump -D -b binary -m m32c --adjust-vma=0xF00000 MAIN.inv.bin
+```
+
+Both decoders are CGEN-based and incomplete: 18 % (M16C) / 14 % (M32C) of instructions
+print as `*unknown*`, including common ones such as M16C `JSR.A abs20` (FD xx xx xx)
+and `PUSH.W #imm16` (7D E2 xx xx). The unknown rate therefore does not discriminate
+the two ISAs ([tools/isa_score.sh](../tools/isa_score.sh)); the prologue/epilogue
+signatures do ([tools/isa_signatures.py](../tools/isa_signatures.py)). For Phase 1d the
+decoder gaps must be filled (Renesas M16C/M32C software manuals) or a different
+disassembler used.
