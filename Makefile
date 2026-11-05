@@ -34,13 +34,18 @@ $(IMAGES)/manifest.txt:
 
 images: $(IMAGES)/manifest.txt
 
+# Portable (POSIX sh): compare each extracted image's sha256 against ref/images.sha256.
+# Note: make runs recipes with /bin/sh, so no bash process substitution here.
 verify: images
-	@cd $(IMAGES) && shasum -a 256 -c <(sed 's#.*/##' $(CURDIR)/ref/images.sha256) 2>/dev/null \
-	   || (echo "verify: regenerating comparison"; \
-	       cd $(IMAGES) && for f in *.flash.bin; do \
-	         h=$$(shasum -a 256 "$$f" | cut -c1-64); \
-	         grep -q "$$h" $(CURDIR)/ref/images.sha256 && echo "OK   $$f" || echo "FAIL $$f"; \
-	       done)
+	@cd $(IMAGES) && ok=0; bad=0; \
+	 for f in *.flash.bin; do \
+	   h=$$(shasum -a 256 "$$f" | cut -c1-64); \
+	   if grep -q "$$h" $(CURDIR)/ref/images.sha256; then \
+	     echo "OK   $$f"; ok=$$((ok+1)); \
+	   else echo "FAIL $$f"; bad=$$((bad+1)); fi; \
+	 done; \
+	 echo "verify: $$ok OK, $$bad FAIL (ref has $$(grep -c . $(CURDIR)/ref/images.sha256))"; \
+	 [ $$bad -eq 0 ]
 
 disasm: images
 	sh tools/disasm.sh $(IMAGES) $(DISASM)

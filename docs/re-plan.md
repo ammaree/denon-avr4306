@@ -1,8 +1,11 @@
 # AVR-4306 firmware reverse-engineering plan
 
-Status: draft from local documentation only (service manual Ver. 3, upgrade manual,
-control protocol 4.6a, operating instructions). No firmware image has been analysed yet.
-Hardware facts: [hardware.md](hardware.md).
+Status: updated 2026-11-05. All nine package images have since been extracted and
+hash-verified, the four ISAs confirmed, the update route read from the package/schematic,
+the MAIN control protocol traced end to end in the emulator, and the M32C emulator built
+and validated. Phase 1 scorecard against the objectives: [phase1-status.md](phase1-status.md).
+Hardware facts: [hardware.md](hardware.md). The byte-exact-rebuild deliverable (1a) is
+blocked on a physical boot-block dump — see phase1-status.md (c).
 
 ## 1. What "the firmware" is
 
@@ -123,11 +126,14 @@ images are in hand.
 
 ### 1e. Emulation and test
 
-- F1/F2 ISA: GDB's `sim/m32c` simulator covers M16C and M32C instructions **[verify
-  coverage of M32C/87]**. Add peripheral models: timers, UARTs, interrupt controller,
-  ports, flash registers.
+- F1/F2 ISA: GDB's `sim/m32c` simulator covers M16C and M32C instructions — **built and
+  verified** (emulation.md): it executes real MAIN bytes, including the ones the CGEN
+  disassembler prints as `*unknown*`. The board shim (bootstrap stub, SFR tracer, UART1
+  bridge) is in tools/sim.sh and sim/. Still to add for a full board: timers beyond
+  timer A, interrupt controller, more UARTs, ports, flash registers.
 - Board model: UART link F1↔F2, stub DM850 on SPI/UART, FL display capture (PT6302
   serial stream → text), TC4094 output capture (relays, mutes), encoder/key/IR injection.
+  (UART1 host side is already bridged to stdin/stdout; the rest is Phase 2 work.)
 - F3: no free SHARC simulator expected; test F3 by image hash only, and by its host-port
   traffic from F2.
 - Differential testing: run original and rebuilt image side by side; feed identical
