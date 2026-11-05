@@ -14,7 +14,7 @@ BUILD := build
 IMAGES := $(BUILD)/images
 DISASM := $(BUILD)/disasm
 
-.PHONY: images verify disasm clean
+.PHONY: images verify disasm sim-selftest clean
 .DEFAULT_GOAL := images
 
 # Unpack the updater zip (and the recovery package if present) into build/, then extract.
@@ -44,6 +44,9 @@ verify: images
 
 disasm: images
 	sh tools/disasm.sh $(IMAGES) $(DISASM)
+
+sim-selftest:
+	sh tools/sim.sh selftest
 
 clean:
 	rm -rf $(BUILD)

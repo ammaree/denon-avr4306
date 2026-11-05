@@ -9,6 +9,7 @@ Reverse engineering of the Denon AVR-4306 AV receiver firmware (target version 6
 - [docs/update-tools.md](docs/update-tools.md) — FWCV recovery package, updater protocol strings, DM850 TFTP update path, CPLD VME player
 - [docs/research.md](docs/research.md) — online research: Renesas memory maps and serial protocol, ADSP boot modes, BridgeCo DM850
 - [docs/building.md](docs/building.md) — make images / verify / disasm harness
+- [docs/emulation.md](docs/emulation.md) — M32C/M16C simulator harness (objective d), self-test, limits
 - [tools/](tools/) — extraction and analysis scripts; [ref/images.sha256](ref/images.sha256) — image hashes
 
 Source documents (local, not in this repo):
