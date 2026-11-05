@@ -10,7 +10,8 @@ Implements the protocol as decompiled from the 6.0.0.4 updater (docs/loader-inte
                 <= 0x400 bytes, each acknowledged by the PC; S is NACKed unless in update
                 mode
 Memory: --image at 0xF00000 (e.g. build/images/MAIN_01.00.flash.bin); 0xFFC000-0xFFFFFF
-filled with a known pattern (low byte of addr*7+3) standing in for the resident blocks.
+filled with a known pattern (low byte of addr*7+3) standing in for the resident blocks;
+settings RAM 0x0400-0x2701 with low byte of addr*13+5.
 --corrupt N sends every Nth data frame with a bad checksum (tests NACK/retry).
 Any other frame type is answered with NACK and logged as a protocol violation.
 
@@ -26,6 +27,8 @@ def ck(b):
 
 
 def mem_read(img, addr):
+    if 0x0400 <= addr <= 0x2701:
+        return (addr * 13 + 5) & 0xFF
     if 0xFFC000 <= addr <= 0xFFFFFF:
         return (addr * 7 + 3) & 0xFF
     if 0xF00000 <= addr < 0xF00000 + len(img):

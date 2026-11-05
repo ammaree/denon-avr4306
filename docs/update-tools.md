@@ -108,6 +108,23 @@ AVC-4320JPN`, header parse `%4s%2s%4s` (model, region, version). It talks to the
 over one TCP connection (socket/htons/connect/send/recv only). `original_AVR-4306.bid`
 (`4306EU0099`) is a file this tool produced from an EU unit running MAIN 00.99.
 
+**Save flow, decompiled 2026-11-05 (Ghidra; `FUN_004018F0`).** All on TCP 5000:
+
+1. "Reboot(Save mode)" (`FUN_00401D90`): `VI?\r`, `SYMO\r` (model/region), check them,
+   then `RBUPDATE\r` → `RBSTART`, wait 5 s, close.
+2. Reconnect, `C(1)` with a 5 s timeout (`FUN_00403670`).
+3. Target information (`FUN_00403770(1, …)`); model name compared with the file type.
+4. "Saving" (`FUN_004032F0`): `S` = `AA 'S' 01 01 00000400 00002701 ck` (sub-byte 1),
+   data frames with ACK/NACK; the file is `%4s%2s%4s` (model, region, version) + RAM
+   0x040C–0x2701 (8,950 B).
+5. "Reboot(Normal mode)" (`FUN_00401F40`): reconnect, wait 5 s, `X` frame
+   `AA 'X' 01 02 01 ck`, wait 5 s, `RBNORM\r` → `RBSTART`, wait 5 s, close.
+
+So the vendor's own settings backup is an update-mode session: there is no normal-mode
+path to the settings. `tools/loader_client.py read` does steps 1–4 without `SYMO`
+(and with the updater's 15 s wait and sub-byte 0), and exits by power cycle instead of
+step 5.
+
 ## 4. Open items
 
 1. Disassemble the FWCV tool (x86, MFC) to recover the exact framing of `P/L/S/C/D`

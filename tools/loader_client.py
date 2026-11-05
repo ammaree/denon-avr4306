@@ -28,10 +28,12 @@ Commands:
                                                  update mode: the vendor sends it only when
                                                  'VI?' fails. No reply in normal mode is
                                                  expected (seen on the unit 2026-11-05).
-  loader_client.py read    --ip IP --start A --end B --confirm-update-mode
-        VI?, RBUPDATE -> RBSTART, wait 15 s, then C and S(A, B) on port 5000; saves the
-        bytes to dumps/ with a sha256. Afterwards the unit must be power-cycled (vendor
-        procedure).
+  loader_client.py read    --ip IP [--range A:B ...] --confirm-update-mode
+        VI?, RBUPDATE -> RBSTART, wait 15 s, then C and one S per range on port 5000;
+        saves each range to dumps/ with a sha256. Default ranges: settings RAM
+        0x040C-0x2701 (the vendor parameter backup, same bytes as an SSManage .bid body),
+        then resident blocks 0xFFC000-0xFFFFFF. Afterwards the unit must be power-cycled
+        (vendor procedure).
 
 Run with python3 -I. --control-port / --loader-port exist for the local test peer
 (sim/fake_unit.py).
@@ -42,6 +44,9 @@ ALLOWED_TYPES = {b'C', b'S', b'A', b'N'}     # frames this tool may ever send
 REFUSED_PORTS = {5001}                       # DM850 bootloader commands (FUN_004090A0)
 UPDATE_SETTLE = 15.0                         # vendor wait after RBSTART (0x408137)
 MAX_READ = 0x400000
+# Settings RAM first (updater parameter backup S(1, 0, 0x040C, 0x2701); SSManage reads
+# 0x0400..0x2701 the same way), then the resident loader blocks 0-2.
+DEFAULT_RANGES = [(0x040C, 0x2701), (0xFFC000, 0xFFFFFF)]
 DATA_TYPES = (ord('D'), ord('P'))
 
 
@@ -54,6 +59,11 @@ def frame(ftype, tgt, body=b''):
         raise ValueError(f'refused: frame type {ftype!r} is not read-only')
     f = b'\xAA' + ftype + bytes([tgt]) + body
     return f + bytes([ck(f)])
+
+
+def parse_range(s):
+    start, end = (int(x, 0) for x in s.split(':'))
+    return start, end
 
 
 def frame_s(tgt, start, end):
@@ -210,8 +220,10 @@ def cmd_read(a, log):
     if not a.confirm_update_mode:
         sys.exit('refused: `read` puts the unit in update mode. Follow docs/safety-plan.md '
                  '(UPS, direct cable, nothing else on the LAN), then add --confirm-update-mode.')
-    if a.end < a.start or a.end - a.start + 1 > MAX_READ:
-        sys.exit('refused: range must be 1 byte .. 4 MB')
+    ranges = a.range or DEFAULT_RANGES
+    for start, end in ranges:
+        if end < start or end - start + 1 > MAX_READ:
+            sys.exit('refused: each range must be 1 byte .. 4 MB')
     # Same order as the vendor update (FUN_00407C60), all on the control port.
     # 1. Version request, normal mode (FUN_00407EA0).
     t = Link(a.ip, a.control_port, log)
@@ -240,26 +252,31 @@ def cmd_read(a, log):
     print(f'unit confirmed update mode (RBSTART); waiting {UPDATE_SETTLE:.0f} s as the '
           'vendor tool does')
     time.sleep(UPDATE_SETTLE)
-    # 3. Loader (FUN_00408170): C with 3 tries, then the read.
+    # 3. Loader (FUN_00408170): C with 3 tries, then the reads in the order given, each
+    #    saved as soon as it arrives.
+    d = os.path.join('dumps', 'loader-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+    good = 0
     l = Link(a.ip, a.loader_port, log)
     try:
         if not connect_check(l, a.target, log, tries=3):
             print('loader did not answer C after RBSTART')
-            data = None
         else:
-            data = read_range(l, a.target, a.start, a.end, log)
+            for start, end in ranges:
+                data = read_range(l, a.target, start, end, log)
+                if not data:
+                    break
+                os.makedirs(d, exist_ok=True)
+                p = os.path.join(d, f'tgt{a.target:02X}_{start:06X}_{end:06X}.bin')
+                open(p, 'wb').write(data)
+                print(f'{p}: {len(data)} bytes (asked {end - start + 1}), '
+                      f'sha256 {hashlib.sha256(data).hexdigest()}')
+                good += 1
+                time.sleep(a.delay)
     finally:
         l.close()
-    if data:
-        d = os.path.join('dumps', 'loader-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
-        os.makedirs(d, exist_ok=True)
-        p = os.path.join(d, f'tgt{a.target:02X}_{a.start:06X}_{a.end:06X}.bin')
-        open(p, 'wb').write(data)
-        print(f'{p}: {len(data)} bytes (asked {a.end - a.start + 1}), '
-              f'sha256 {hashlib.sha256(data).hexdigest()}')
     print('\nNOW: turn the unit off with its power switch, wait 10 s, turn it on '
           '(vendor manual 3.9-3). Then check the version screen and a VI? query.')
-    return bool(data)
+    return good == len(ranges)
 
 
 def main():
@@ -270,8 +287,9 @@ def main():
                     help='port for VI?/RBUPDATE (vendor update uses 5000; 23 also answers VI?)')
     ap.add_argument('--loader-port', type=int, default=5000)
     ap.add_argument('--target', type=lambda x: int(x, 0), default=1, help='1 = MAIN')
-    ap.add_argument('--start', type=lambda x: int(x, 0), default=0xFFC000)
-    ap.add_argument('--end', type=lambda x: int(x, 0), default=0xFFFFFF)
+    ap.add_argument('--range', action='append', type=parse_range, metavar='START:END',
+                    help='inclusive address range, repeatable; default: settings RAM '
+                         '0x040C:0x2701, then resident blocks 0xFFC000:0xFFFFFF')
     ap.add_argument('--delay', type=float, default=2.0, help='seconds between connections')
     ap.add_argument('--confirm-update-mode', action='store_true')
     ap.add_argument('--log', default=None, help='transcript file (default dumps/loader.log)')

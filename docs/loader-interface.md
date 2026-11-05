@@ -246,14 +246,17 @@ vendor image of the same version can be re-flashed (simplifies safety-plan Stage
 ### 2.7 Read-only client
 
 [tools/loader_client.py](../tools/loader_client.py) implements only update steps 1–3
-plus a single `S` read, in the vendor order of §2.1: `version` (`VI?`), `check` (`C`;
+plus `S` reads, in the vendor order of §2.1: `version` (`VI?`), `check` (`C`;
 answered in update mode only), `read` (`VI?` → `RBUPDATE`/`RBSTART` → 15 s → `C` ×3 →
-`S(start,end)` → ACK per frame), all on port 5000 by default. Its frame builder refuses
+one `S(start,end)` per `--range` → ACK per frame), all on port 5000 by default. Default
+ranges: settings RAM 0x040C–0x2701 (the settings backup; SSManage reads it the same way,
+update-tools.md §3a), then blocks 0–2. Its frame builder refuses
 anything but C, S, A, N; it refuses port 5001; `read` needs `--confirm-update-mode`;
 connections are paced. Tested against [sim/fake_unit.py](../sim/fake_unit.py) (a local
 peer implementing §2.1–2.6, `C` silent in normal mode): normal-mode `check` NG, blocks
 0–2 pattern read byte-exact, 32 KB application range byte-exact with every 5th data
-frame corrupted (NACK/retry). The fake encodes this document's reading of the protocol;
+frame corrupted (NACK/retry), default two-range session (8,950 B settings + 16 KB
+blocks 0–2) byte-exact with every 4th frame corrupted. The fake encodes this document's reading of the protocol;
 it does not prove the real loader behaves the same.
 
 ## 3. bCoD and AVTOOL3 (solved — see tools)

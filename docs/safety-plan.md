@@ -60,7 +60,7 @@ Before:
       within the next 2 hours.
 - [ ] PC wired directly to the unit (crossover or a dedicated switch with nothing else
       on it), static IPs, Wi-Fi off, no other tool talking to the unit.
-- [ ] Settings backup (`.bid`) taken and copied off the PC.
+- [ ] Settings backup (settings RAM 0x040C–0x2701 from the Stage 3 session, or a `.bid`) taken and copied off the PC.
 - [ ] Unit AC power-cycled immediately before; DM850 answers ping.
 - [ ] Image set contains only the intended target; no VME stage; no bootloader image.
 
@@ -77,10 +77,10 @@ After:
 
 | Stage | Content | Unit writes |
 |---|---|---|
-| 0 | Version screen, MAC/IP, menu photos, SSManage `.bid` + FWCV parameter backup | none |
+| 0 | Version screen (done by `VI?`: 6.0.0.4), MAC/IP, menu photos. The settings backup is **not** a normal-mode step: SSManage itself enters update mode to take it (update-tools.md §3a). It moves into the Stage 3 session | none |
 | 1 | Offline: RE FWCV/updater (loader paths, read command, RS-232 path, DM850 recovery, VME stage); RE MAIN app↔loader interface (no-touch zone, block A runtime writes); bCoD checksum; byte-exact AVTOOL3 packer | none |
 | 2 | LAN hang diagnosis (firmware vs hardware); DM850 `start bootloader`/`start image`; DM850W re-flash of the same vendor build ("Disable pass." checkbox in the updater turns off the same-version skip); DM850I re-flash of the same vendor build | DM850 only, vendor bytes |
-| 3 | MAIN blocks 0–2 dump. **Primary: read-only `S` read through the vendor loader protocol** with `tools/loader_client.py read` — the same session the vendor updater opens on every update (`VI?`, `RBUPDATE`/`RBSTART`, 15 s, `C`, `S`, all on TCP 5000), with the range 0xFFC000–0xFFFFFF; no `L`, no write, never TCP 5001 (DM850 bootloader channel) (loader-interface.md §2.1–2.7). Exit = power cycle, as in the vendor manual. Residual risks: loader behaviour on entry is not visible (the application side is proven non-destructive; the vendor log shows erasing only at the per-image step); the loader may refuse the range (harmless NACK); entering update mode may reset settings (take the `.bid` first). Fallback if the range is refused: minimal read-only MAIN patch. Gate A: loader recovers a broken app by itself | 0 MAIN (primary), 1 MAIN (fallback) |
+| 3 | MAIN blocks 0–2 dump. **Primary: read-only `S` read through the vendor loader protocol** with `tools/loader_client.py read` — the same session the vendor updater opens on every update (`VI?`, `RBUPDATE`/`RBSTART`, 15 s, `C`, `S`, all on TCP 5000), with two ranges in one session: settings RAM 0x040C–0x2701 first (the settings backup, same bytes as a `.bid` body), then 0xFFC000–0xFFFFFF; no `L`, no write, never TCP 5001 (DM850 bootloader channel) (loader-interface.md §2.1–2.7). Exit = power cycle, as in the vendor manual. Residual risks: loader behaviour on entry is not visible (the application side is proven non-destructive; the vendor log shows erasing only at the per-image step); the loader may refuse a range (harmless NACK). Settings survive entry: both vendor tools read the settings RAM *after* `RBUPDATE`, so the jump is warm. Menu photos remain the fallback for restoring settings by hand. Fallback if the range is refused: minimal read-only MAIN patch. Gate A: loader recovers a broken app by itself | 0 MAIN (primary), 1 MAIN (fallback) |
 | 4 | DM850I reliability patch for the fault found in Stage 2 | DM850 |
 | 5 | MAIN patches after Gate A: DM850 supervisor (E_RESET/EPOWER), protocol hardening, further functions; bypass key + boot-attempt counter | MAIN, batched |
 
