@@ -177,3 +177,32 @@ checked with `VI?`.
 
 The DM850 passes control lines on 5000 through to MAIN in normal mode, as the vendor
 update flow requires. The first step of `loader_client.py read` works on this unit.
+
+## First update-mode session (2026-11-05 21:57–22:05, read only)
+
+User decision: run on the house LAN (wired `en11`, Wi-Fi up, home-automation controller
+off), not an isolated cable. UPS in place. No flash writes.
+
+| Time | Step | Result |
+|---|---|---|
+| 21:57:49 | `VI?` on 5000 | answered |
+| | `RBUPDATE` → `RBSTART`, 15 s wait, `C(1)` | all answered first try |
+| 21:58:06 | `S(1, sub 0, 0x040C, 0x2701)` | ACK; streamed **0xF00000–0xFFBFFF** (1,032,192 B), range ignored |
+| 21:59:45 | `S(1, sub 0, 0xFFC000, 0xFFFFFF)` | same 1 MB again, same sha256 `0fcc8350…` |
+| 22:02:07 | `C(1)` on a new connection | answered: unit still in update mode |
+| 22:02:09 | `S(1, sub 1, 0x0400, 0x2701)` (SSManage's frame) | ACK; streamed **RAM 0x0400–0xC3FF** (49,152 B), range ignored |
+| ~22:04 | user power-cycles the unit | |
+| 22:05:04 | ping, ARP, `VI?`, `C` | MAC 00:05:CD:13:81:94; `VI?` answered (preceded by power-on `CVSR 50…` status lines); `C` silent = normal mode |
+
+Results:
+
+- **Flash retention / identity:** the 1 MB application dump equals vendor MAIN 01.00
+  (`build/images/MAIN_01.00.flash.bin`) byte for byte.
+- **Settings backup:** RAM 0x040C–0x2701 (8,950 B, the `.bid` body) saved as
+  `dumps/loader-20261105-220209/settings_040C_2701.bin` (sha256 `02bed182…`). Contains
+  the input names and the FM presets (Lesedi FM, Hot 102.7, 5FM, Talk 702, Metro FM,
+  SAFM, …). Full RAM: `tgt01_s1_000400_00C3FF.bin` (sha256 `ad1936c4…`).
+- **Blocks 0–2: not reachable with `S`.** Sub 0 = application flash, sub 1 = RAM; start
+  and end are not used. Other sub values were not tried (meaning unknown).
+- Update-mode entry and exit by power cycle left the unit working; settings were not
+  reset.

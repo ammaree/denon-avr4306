@@ -9,8 +9,11 @@ TCP 5001 is the DM850 bootloader channel; this tool refuses it.
 
   frame   = AA <type> <target> ... <ck>        ck = low byte of the sum of all prior bytes
   C       = AA 'C' tgt ck                       connect / target info (reply type 'C')
-  S       = AA 'S' tgt 00 start32 end32 ck      read memory start..end (BE); reply ACK, then
-                                                data frames
+  S       = AA 'S' tgt sub start32 end32 ck     read memory (BE); reply ACK, then data
+                                                frames. On the unit (MAIN 01.00, 2026-11-05)
+                                                start/end are ignored: sub 0 streams flash
+                                                0xF00000-0xFFBFFF, sub 1 streams RAM
+                                                0x0400-0xC3FF. Blocks 0-2 are not reachable.
   data    = AA 'D'|'P' tgt status len16 addr32 payload ck
             status 0 = only, 1 = first, 2 = middle, 3 = last frame
   A / N   = AA 'A'|'N' tgt ck                   ACK / NACK from the PC after each data frame
@@ -30,10 +33,11 @@ Commands:
                                                  expected (seen on the unit 2026-11-05).
   loader_client.py read    --ip IP [--range A:B ...] --confirm-update-mode
         VI?, RBUPDATE -> RBSTART, wait 15 s, then C and one S per range on port 5000;
-        saves each range to dumps/ with a sha256. Default ranges: settings RAM
-        0x040C-0x2701 (the vendor parameter backup, same bytes as an SSManage .bid body),
-        then resident blocks 0xFFC000-0xFFFFFF. Afterwards the unit must be power-cycled
-        (vendor procedure).
+        saves what each S returns to dumps/, named by the addresses actually received,
+        with a sha256. Default: --sub 1, range 0x0400:0x2701 (SSManage's settings read;
+        returns all RAM, settings at 0x040C-0x2701). --sub 0 returns the application
+        flash. --in-update-mode skips VI?/RBUPDATE for a unit not yet power-cycled.
+        Afterwards the unit must be power-cycled (vendor procedure).
 
 Run with python3 -I. --control-port / --loader-port exist for the local test peer
 (sim/fake_unit.py).
@@ -44,9 +48,8 @@ ALLOWED_TYPES = {b'C', b'S', b'A', b'N'}     # frames this tool may ever send
 REFUSED_PORTS = {5001}                       # DM850 bootloader commands (FUN_004090A0)
 UPDATE_SETTLE = 15.0                         # vendor wait after RBSTART (0x408137)
 MAX_READ = 0x400000
-# Settings RAM first (updater parameter backup S(1, 0, 0x040C, 0x2701); SSManage reads
-# 0x0400..0x2701 the same way), then the resident loader blocks 0-2.
-DEFAULT_RANGES = [(0x040C, 0x2701), (0xFFC000, 0xFFFFFF)]
+# SSManage's settings read S(1, 1, 0x0400, 0x2701) (update-tools.md §3a).
+DEFAULT_RANGES = [(0x0400, 0x2701)]
 DATA_TYPES = (ord('D'), ord('P'))
 
 
@@ -66,8 +69,10 @@ def parse_range(s):
     return start, end
 
 
-def frame_s(tgt, start, end):
-    return frame(b'S', tgt, b'\x00' + start.to_bytes(4, 'big') + end.to_bytes(4, 'big'))
+def frame_s(tgt, start, end, sub=0):
+    # sub 0: MAIN 01.00's loader ignores start/end and streams 0xF00000-0xFFBFFF (unit,
+    # 2026-11-05). sub 1: SSManage's settings read, S(1, 1, 0x0400, 0x2701).
+    return frame(b'S', tgt, bytes([sub]) + start.to_bytes(4, 'big') + end.to_bytes(4, 'big'))
 
 
 class Link:
@@ -179,14 +184,14 @@ def cmd_check(a, log):
         l.close()
 
 
-def read_range(link, tgt, start, end, log):
-    link.send(frame_s(tgt, start, end))
+def read_range(link, tgt, start, end, log, sub=0):
+    link.send(frame_s(tgt, start, end, sub))
     f = link.read_frame(6.0)
     log(f'< S reply: {desc(f)}')
     if f is None or f[1] != ord('A') or ck(f[:-1]) != f[-1]:
         print('S not acknowledged:', desc(f), '— loader refused or not in update mode')
         return None
-    data, retries, expect = bytearray(), 0, start
+    data, retries, expect, first = bytearray(), 0, start, None
     while True:
         f = link.read_frame(6.0)
         if f is None or f[1] not in DATA_TYPES or ck(f[:-1]) != f[-1]:
@@ -201,19 +206,21 @@ def read_range(link, tgt, start, end, log):
         addr = int.from_bytes(f[6:10], 'big')
         if addr != expect:
             log(f'  note: frame address {addr:#08x}, expected {expect:#08x}')
+        if first is None:
+            first = addr
         data += f[10:10 + n]
         expect = addr + n
         retries = 0
         link.send(frame(b'A', tgt))
         log(f'< data status={status} addr={addr:#08x} len={n}')
         if status in (0, 3):
-            return bytes(data)
+            return first, bytes(data)
         if status not in (1, 2):
             print(f'unexpected status {status}; stopping')
-            return bytes(data)
+            return first, bytes(data)
         if len(data) > MAX_READ:
             print('read exceeds 4 MB; stopping')
-            return bytes(data)
+            return first, bytes(data)
 
 
 def cmd_read(a, log):
@@ -224,6 +231,10 @@ def cmd_read(a, log):
     for start, end in ranges:
         if end < start or end - start + 1 > MAX_READ:
             sys.exit('refused: each range must be 1 byte .. 4 MB')
+    if a.in_update_mode:
+        # Unit already in update mode from an earlier session (no power cycle since):
+        # skip VI?/RBUPDATE; the C frame below confirms the loader is there.
+        return read_ranges(a, log, ranges)
     # Same order as the vendor update (FUN_00407C60), all on the control port.
     # 1. Version request, normal mode (FUN_00407EA0).
     t = Link(a.ip, a.control_port, log)
@@ -252,6 +263,10 @@ def cmd_read(a, log):
     print(f'unit confirmed update mode (RBSTART); waiting {UPDATE_SETTLE:.0f} s as the '
           'vendor tool does')
     time.sleep(UPDATE_SETTLE)
+    return read_ranges(a, log, ranges)
+
+
+def read_ranges(a, log, ranges):
     # 3. Loader (FUN_00408170): C with 3 tries, then the reads in the order given, each
     #    saved as soon as it arrives.
     d = os.path.join('dumps', 'loader-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
@@ -262,13 +277,16 @@ def cmd_read(a, log):
             print('loader did not answer C after RBSTART')
         else:
             for start, end in ranges:
-                data = read_range(l, a.target, start, end, log)
-                if not data:
+                got = read_range(l, a.target, start, end, log, a.sub)
+                if not got or not got[1]:
                     break
+                first, data = got
+                last = first + len(data) - 1
                 os.makedirs(d, exist_ok=True)
-                p = os.path.join(d, f'tgt{a.target:02X}_{start:06X}_{end:06X}.bin')
+                p = os.path.join(d, f'tgt{a.target:02X}_s{a.sub}_{first:06X}_{last:06X}.bin')
                 open(p, 'wb').write(data)
-                print(f'{p}: {len(data)} bytes (asked {end - start + 1}), '
+                print(f'{p}: {len(data)} bytes, {first:#08x}-{last:#08x} '
+                      f'(asked {start:#08x}-{end:#08x}), '
                       f'sha256 {hashlib.sha256(data).hexdigest()}')
                 good += 1
                 time.sleep(a.delay)
@@ -288,8 +306,11 @@ def main():
     ap.add_argument('--loader-port', type=int, default=5000)
     ap.add_argument('--target', type=lambda x: int(x, 0), default=1, help='1 = MAIN')
     ap.add_argument('--range', action='append', type=parse_range, metavar='START:END',
-                    help='inclusive address range, repeatable; default: settings RAM '
-                         '0x040C:0x2701, then resident blocks 0xFFC000:0xFFFFFF')
+                    help='inclusive address range, repeatable; default 0x0400:0x2701')
+    ap.add_argument('--sub', type=lambda x: int(x, 0), default=1, choices=[0, 1],
+                    help='S sub-byte: 0 = updater read, 1 = SSManage settings read')
+    ap.add_argument('--in-update-mode', action='store_true',
+                    help='unit is already in update mode: skip VI?/RBUPDATE')
     ap.add_argument('--delay', type=float, default=2.0, help='seconds between connections')
     ap.add_argument('--confirm-update-mode', action='store_true')
     ap.add_argument('--log', default=None, help='transcript file (default dumps/loader.log)')

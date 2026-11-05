@@ -6,12 +6,12 @@ Implements the protocol as decompiled from the 6.0.0.4 updater (docs/loader-inte
   telnet port : 'VI?\\r' -> 'VIxxxx\\r';  'RBUPDATE\\r' -> 'RBSTART\\r' and update mode
   loader port : the same two text commands (the vendor update sends them on 5000), and
                 AA frames: C -> C reply in update mode only (silent in normal mode, as the
-                real unit on 2026-11-05); S(start,end) -> ACK, then data frames of
-                <= 0x400 bytes, each acknowledged by the PC; S is NACKed unless in update
-                mode
-Memory: --image at 0xF00000 (e.g. build/images/MAIN_01.00.flash.bin); 0xFFC000-0xFFFFFF
-filled with a known pattern (low byte of addr*7+3) standing in for the resident blocks;
-settings RAM 0x0400-0x2701 with low byte of addr*13+5.
+                real unit on 2026-11-05); S -> ACK, then data frames of <= 0x400 bytes,
+                each acknowledged by the PC; S is NACKed unless in update mode. As on the
+                real unit, S ignores start/end: sub 0 streams the image (0xF00000..),
+                sub 1 streams RAM 0x0400-0xC3FF
+Memory: --image at 0xF00000 (e.g. build/images/MAIN_01.00.flash.bin); RAM 0x0400-0xC3FF
+with low byte of addr*13+5.
 --corrupt N sends every Nth data frame with a bad checksum (tests NACK/retry).
 Any other frame type is answered with NACK and logged as a protocol violation.
 
@@ -27,10 +27,8 @@ def ck(b):
 
 
 def mem_read(img, addr):
-    if 0x0400 <= addr <= 0x2701:
+    if 0x0400 <= addr <= 0xC3FF:
         return (addr * 13 + 5) & 0xFF
-    if 0xFFC000 <= addr <= 0xFFFFFF:
-        return (addr * 7 + 3) & 0xFF
     if 0xF00000 <= addr < 0xF00000 + len(img):
         return img[addr - 0xF00000]
     return 0
@@ -98,7 +96,12 @@ def serve_loader(sock, img, corrupt):
                             rep = b'\xAAN' + bytes([tgt])
                             c.sendall(rep + bytes([ck(rep)]))
                             continue
-                        start, end = int.from_bytes(f[4:8], 'big'), int.from_bytes(f[8:12], 'big')
+                        # As the real loader (2026-11-05): range ignored, sub-byte picks
+                        # the area.
+                        if f[3] == 1:
+                            start, end = 0x0400, 0xC3FF
+                        else:
+                            start, end = 0xF00000, 0xF00000 + len(img) - 1
                         ack = b'\xAAA' + bytes([tgt])
                         c.sendall(ack + bytes([ck(ack)]))
                         a = start

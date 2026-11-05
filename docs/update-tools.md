@@ -122,8 +122,9 @@ over one TCP connection (socket/htons/connect/send/recv only). `original_AVR-430
 
 So the vendor's own settings backup is an update-mode session: there is no normal-mode
 path to the settings. `tools/loader_client.py read` does steps 1–4 without `SYMO`
-(and with the updater's 15 s wait and sub-byte 0), and exits by power cycle instead of
-step 5.
+(with the updater's 15 s wait and SSManage's sub-byte 1), and exits by power cycle
+instead of step 5. On the unit the sub-1 read returns all RAM 0x0400–0xC3FF; the range
+in the frame is ignored (lan-access.md, 2026-11-05).
 
 ## 4. Open items
 

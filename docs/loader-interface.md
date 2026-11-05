@@ -196,10 +196,18 @@ Uses of `S` found:
   SSManage file `original_AVR-4306.bid` is 8,960 B = 10-byte header `4306EU0099` +
   0x22F6 B — the same parameter block.
 
-**Consequence:** the loader serves reads of caller-chosen ranges, including non-flash
-(RAM) addresses. `S(1, 0, 0xFFC000, 0xFFFFFF)` in update mode should return blocks 0–2
-with **no write** — unless Denon's loader filters that range. This would replace the
-custom dump patch (safety-plan Stage 3), the riskiest planned step.
+~~Consequence: the loader serves reads of caller-chosen ranges.~~ **Tested on the unit
+2026-11-05 (lan-access.md): it does not.** MAIN 01.00's update-mode responder ignores
+start/end; the sub-byte (byte 3) selects the area:
+
+| Sub | Streams | Size |
+|---|---|---|
+| 0 | flash 0xF00000–0xFFBFFF (application, blocks 3–20) | 1,032,192 B |
+| 1 | RAM 0x0400–0xC3FF | 49,152 B |
+
+So blocks 0–2 cannot be read this way; the read-only patch (safety-plan Stage 3
+fallback) is the remaining route. The updater's "parameter backup" with sub 0 and RAM
+addresses would also return flash; the working settings read is SSManage's sub 1.
 
 ### 2.5 Update sequence (master loop `FUN_00406C50`, up to 20 images)
 
@@ -248,16 +256,16 @@ vendor image of the same version can be re-flashed (simplifies safety-plan Stage
 [tools/loader_client.py](../tools/loader_client.py) implements only update steps 1–3
 plus `S` reads, in the vendor order of §2.1: `version` (`VI?`), `check` (`C`;
 answered in update mode only), `read` (`VI?` → `RBUPDATE`/`RBSTART` → 15 s → `C` ×3 →
-one `S(start,end)` per `--range` → ACK per frame), all on port 5000 by default. Default
-ranges: settings RAM 0x040C–0x2701 (the settings backup; SSManage reads it the same way,
-update-tools.md §3a), then blocks 0–2. Its frame builder refuses
-anything but C, S, A, N; it refuses port 5001; `read` needs `--confirm-update-mode`;
-connections are paced. Tested against [sim/fake_unit.py](../sim/fake_unit.py) (a local
-peer implementing §2.1–2.6, `C` silent in normal mode): normal-mode `check` NG, blocks
-0–2 pattern read byte-exact, 32 KB application range byte-exact with every 5th data
-frame corrupted (NACK/retry), default two-range session (8,950 B settings + 16 KB
-blocks 0–2) byte-exact with every 4th frame corrupted. The fake encodes this document's reading of the protocol;
-it does not prove the real loader behaves the same.
+one `S` per `--range` → ACK per frame), all on port 5000 by default. Default: `--sub 1`,
+SSManage's settings read (returns all RAM; settings at 0x040C–0x2701; update-tools.md
+§3a). `--sub 0` returns the application flash. Files are named by the addresses
+actually received. `--in-update-mode` skips `VI?`/`RBUPDATE` for a unit not yet
+power-cycled. Its frame builder refuses anything but C, S, A, N; it refuses port 5001;
+`read` needs `--confirm-update-mode`; connections are paced. The fake
+([sim/fake_unit.py](../sim/fake_unit.py)) now follows the unit's observed behaviour
+(`C` silent in normal mode, `S` range ignored, sub 0/1 areas); against it: normal-mode
+`check` NG, settings read and 1 MB application read byte-exact with every 7th data frame
+corrupted (NACK/retry). Used on the unit 2026-11-05 (lan-access.md).
 
 ## 3. bCoD and AVTOOL3 (solved — see tools)
 
@@ -288,8 +296,9 @@ flash when handing over (§1.4a); the unit-side version for the skip comes from 
    vendor sends `C` only after `RBUPDATE` (update) or after `VI?` has failed (check);
    §2.1. `loader_client.py read` now follows the vendor order.
 6. Who answers `C(1)` / `S(1, …)` in update mode: the update agent (§1.4b) ignores frames
-   for target 1 except `U`/`X`, so it is probably the loader in blocks 0–2. Settled by
-   the first `read`.
+   for target 1 except `U`/`X`, so it is probably the loader in blocks 0–2. The first
+   session shows something answers both (`S` semantics in §2.4); which code does is
+   still open.
 7. ~~Whether the DM850 passes `VI?` on 5000 to MAIN in normal mode.~~ **Answered:** yes,
    same reply as on port 23 (live unit 2026-11-05 21:49, lan-access.md).
 
