@@ -6,6 +6,14 @@ could be traced. Addresses are in MAIN image v01.00 (`MAIN_01.00.flash.bin`, loa
 misaligns too often to walk the listing) and confirmed by executing the code in the
 M32C simulator through the board shim (emulation.md), which decodes correctly.
 
+> **Correction 2026-11-05 (loader-interface.md §1.4b, main-dump-patch.md §2):** the UART1
+> front-end below (init 0xF007DD, ISR 0xF01704, dequeue 0xF01242, RAM 0x3190–0x31D9) belongs to
+> MAIN's **update agent**, not the AV application. The application's own UART ISRs are
+> vectors 17–20 of the table at 0xFFBF00: UART0 TX/RX 0xF4BB72/0xF4BBF2 (DM850 link, line
+> buffer 0x528E), UART1 TX/RX 0xF4B962/0xF4BA26 (rear RS-232, line buffer 0x4A45). Per-line
+> command step 0xF45EEC → 0xF4B1C0 (queries) / 0xF46172 (commands). The token table,
+> dispatcher 0xF4B42E and the id/internal tables below are application code and stand.
+
 ## Which UART
 
 UART1 is the RS-232 host-control port (via HIN202 on the FRONT unit;

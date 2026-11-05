@@ -35,7 +35,13 @@ def mem_read(img, addr):
 
 
 def control_line(c, line):
-    if line == b'VI?':
+    if STATE.get('dm') and len(line) == 9 and line[:2] == b'DM' and line[8:] == b'?':
+        # DM patch (docs/main-dump-patch.md): 32 bytes as hex; resident blocks = pattern
+        a = int(line[2:8], 16)
+        if 0xF00000 <= a <= 0xFFFFE0:
+            body = bytes(STATE['mem'](x) for x in range(a, a + 32))
+            c.sendall(line[:8] + body.hex().upper().encode() + b'\r')
+    elif line == b'VI?':
         c.sendall(b'VI01:0100;02:0050;03:0004;\r')
     elif line == b'RBUPDATE':
         STATE['update'] = True
@@ -139,8 +145,11 @@ def main():
     ap.add_argument('--telnet-port', type=int, default=2323)
     ap.add_argument('--loader-port', type=int, default=5050)
     ap.add_argument('--corrupt', type=int, default=0)
+    ap.add_argument('--dm', action='store_true', help='answer DMaaaaaa? like the DM patch')
     a = ap.parse_args()
     img = open(a.image, 'rb').read()
+    STATE['dm'] = a.dm
+    STATE['mem'] = lambda x: (x * 7 + 3) & 0xFF if x >= 0xFFC000 else mem_read(img, x)
     ts = socket.create_server(('127.0.0.1', a.telnet_port))
     ls = socket.create_server(('127.0.0.1', a.loader_port))
     threading.Thread(target=serve_telnet, args=(ts,), daemon=True).start()

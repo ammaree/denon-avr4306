@@ -38,11 +38,14 @@ Commands:
         returns all RAM, settings at 0x040C-0x2701). --sub 0 returns the application
         flash. --in-update-mode skips VI?/RBUPDATE for a unit not yet power-cycled.
         Afterwards the unit must be power-cycled (vendor procedure).
+  loader_client.py dmdump  --ip IP [--range A:B]  normal mode; needs the DM patch in MAIN
+        (docs/main-dump-patch.md). Sends 'DMaaaaaa?' per 32 bytes on the control port,
+        default range 0xFFC000:0xFFFFFF (blocks 0-2). No update mode, no power cycle.
 
 Run with python3 -I. --control-port / --loader-port exist for the local test peer
 (sim/fake_unit.py).
 """
-import argparse, datetime, hashlib, os, socket, sys, time
+import argparse, datetime, hashlib, os, re, socket, sys, time
 
 ALLOWED_TYPES = {b'C', b'S', b'A', b'N'}     # frames this tool may ever send
 REFUSED_PORTS = {5001}                       # DM850 bootloader commands (FUN_004090A0)
@@ -161,6 +164,47 @@ def cmd_version(a, log):
         return ok
     finally:
         t.close()
+
+
+def cmd_dmdump(a, log):
+    """Normal mode, needs the DM patch in MAIN (docs/main-dump-patch.md): one
+    'DMaaaaaa?' line per 32 bytes, reply 'DMaaaaaa' + 64 hex digits + CR."""
+    start, end = a.range[0] if a.range else (0xFFC000, 0xFFFFFF)
+    if start % 32 or (end + 1) % 32 or not 0xF00000 <= start <= end <= 0xFFFFFF:
+        sys.exit('refused: range must be 32-byte aligned inside 0xF00000-0xFFFFFF')
+    t = Link(a.ip, a.control_port, log)
+    data = bytearray()
+    try:
+        for addr in range(start, end + 1, 32):
+            want = f'DM{addr:06X}'.encode()
+            for attempt in range(3):
+                t.send(f'DM{addr:06X}?\r'.encode())
+                deadline = time.time() + 3.0
+                line = None
+                while time.time() < deadline:
+                    i = t.buf.find(want)
+                    if i >= 0 and t.buf.find(b'\r', i) >= 0:
+                        j = t.buf.find(b'\r', i)
+                        line, t.buf = t.buf[i:j], t.buf[j + 1:]
+                        break
+                    t.fill(deadline)
+                if line and len(line) == 72 and re.fullmatch(rb'[0-9A-F]{64}', line[8:]):
+                    break
+                log(f'  {addr:06X}: bad/missing reply {line!r}, retry')
+            else:
+                sys.exit(f'no valid reply for {addr:06X} after 3 tries; '
+                         'is the DM patch installed?')
+            data += bytes.fromhex(line[8:].decode())
+            if addr % 0x400 == 0:
+                print(f'  {addr:06X}', flush=True)
+    finally:
+        t.close()
+    d = os.path.join('dumps', 'dm-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, f'main_{start:06X}_{end:06X}.bin')
+    open(p, 'wb').write(data)
+    print(f'{p}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}')
+    return True
 
 
 def connect_check(link, tgt, log, tries=1):
@@ -299,7 +343,7 @@ def read_ranges(a, log, ranges):
 
 def main():
     ap = argparse.ArgumentParser(description='read-only AVR-4306 loader-protocol client')
-    ap.add_argument('cmd', choices=['version', 'check', 'read'])
+    ap.add_argument('cmd', choices=['version', 'check', 'read', 'dmdump'])
     ap.add_argument('--ip', required=True)
     ap.add_argument('--control-port', type=int, default=5000,
                     help='port for VI?/RBUPDATE (vendor update uses 5000; 23 also answers VI?)')
@@ -325,7 +369,8 @@ def main():
         lf.flush()
 
     log(f'--- {a.cmd} {a.ip}')
-    ok = {'version': cmd_version, 'check': cmd_check, 'read': cmd_read}[a.cmd](a, log)
+    ok = {'version': cmd_version, 'check': cmd_check, 'read': cmd_read,
+          'dmdump': cmd_dmdump}[a.cmd](a, log)
     sys.exit(0 if ok else 1)
 
 
