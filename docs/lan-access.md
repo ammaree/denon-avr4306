@@ -61,3 +61,31 @@ So "LAN not connecting" is the **DM850 network module crashing/hanging**, not a 
 or DHCP problem — it gets an address and serves briefly, then drops off. A full AC
 power-cycle recovers it. Capture the web UI gently (one request at a time, `--delay`),
 once, right after a power-cycle; do not port-scan or crawl it fast.
+
+## Web UI captured (after power-cycle, gentle pass)
+
+A single serial pass with a 2 s delay captured the whole DM850 web control UI with no
+crash — so careful access is stable; the earlier hang was the aggressive scan/crawl. The
+server is GoAhead-Webs; the UI is a frameset (`/` → `reqTopMenu.asp` which JS-redirects
+to `TopMenu.asp`). Pages (saved under dumps/, git-ignored):
+
+`TopMenu.asp` `sendTopMenu.asp` `mainzone.htm` `reqMainZone_1/2.asp` `reqChannelVol.asp`
+`ChannelVol.asp` `reqSurrPara.asp` `reqTuner.asp` `reqNetAudio.asp` `reqiPod.asp`
+`multizone.htm` `systemsetup.htm` `reqPanelLock.asp` `PanelLock.asp` `S-7_9.asp`.
+
+It is a **control front-end, not a memory interface**, and it maps 1:1 onto the recovered
+serial command set (control-protocol.md) — cross-validation of the RE:
+
+| web control | form field | serial command |
+|---|---|---|
+| Power ON/STANDBY | `radioSystemPower` = ON/STANDBY | PW |
+| channel volumes | `VolumebarFl/Fr/C/Sw/Sl/Sr/Sb/Sbl/Sbr` | CV |
+| surround parameters | reqSurrPara form | PS |
+| tuner | reqTuner form | TF / TP / TM |
+| net audio / iPod | reqNetAudio / reqiPod | NS |
+| panel lock | PanelLock form | SY |
+
+The channel set (FL/FR/C/SW/SL/SR/SB/SBL/SBR) confirms the AVR-4306 7.1+SB layout. No
+model/firmware/version string appeared in the control pages. The web POSTs go to the
+`.asp` pages, which the DM850 turns into control commands to MAIN over UART0 — the same
+protocol decoded in control-protocol.md.
