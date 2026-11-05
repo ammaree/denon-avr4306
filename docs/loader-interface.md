@@ -234,6 +234,14 @@ flash when handing over (§1.4a); the unit-side version for the skip comes from 
 3. "Recovering DM800" (0x40661D → `FUN_004090A0`): how a dead DM850 is reached.
 4. Which control-protocol handler turns ASCII `RBUPDATE` into set_mode + jump (RB is not
    in the 0xF4B206 group; the five set_mode callers are listed in §1.4a).
+5. **§2.6 step 1 conflicts with the live unit.** On 2026-11-05 (after an AC power-cycle,
+   telnet answering `VI?`) TCP 5000 accepted the connection but `aa 43 01 ee` got no
+   reply in 6 s. The frame matches `FUN_0041D270` byte for byte, and §2.1 has the
+   updater send `RBUPDATE` first. Working reading: in normal mode the DM850 does not
+   bridge 5000 to MAIN (or MAIN ignores `C`); `C` is answered only in update mode.
+   Consequence: `loader_client.py read` aborts at its normal-mode `C` step and must be
+   changed to the §2.1 order before Stage 3. Settle from the updater's "Check
+   communication" handler and the DM850I socket code before any update-mode session.
 
 Tooling: Ghidra 12.2 headless with a locally built macOS arm64 decompiler
 ([tools/ghidra/](../tools/ghidra/)); pe_xref.py for quick string/import lookups.

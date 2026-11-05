@@ -135,3 +135,34 @@ Switching the controller off does not close its TCP session: it sends no FIN, so
 DM850 may still hold the session as open until a keep-alive timeout, if it has one.
 Cause 2 is therefore not ruled out. Next: AC power-cycle the receiver with the
 controller still off, wait 1 min after power-on, retry once.
+
+### After AC power-cycle, controller off (2026-11-05 21:38)
+
+| Step | Result |
+|---|---|
+| ping ×2 | 0 % loss |
+| `version`: telnet TCP 23, `VI?` | **connected; reply in 13 ms** |
+| `check`: TCP 5000, `C` frame `aa 43 01 ee` | connect accepted; **no reply in 6 s** |
+| ping ×2 afterwards | 0 % loss |
+
+Port 23 was blocked by the home-automation controller's session (cause 2). Keep that
+controller off whenever tools talk to the unit; it also fits rule 7 of safety-plan.md.
+
+`VI?` reply (raw):
+`VI01:0100;02:0050;03:0004;0A:B200510231011\0×7,I200805270745\0×7;\r`
+
+| Target | Reported | Vendor package |
+|---|---|---|
+| 01 MAIN | 01.00 | 6.0.0.4 (only package with 01.00) |
+| 02 SUB | 00.50 | all packages |
+| 03 DSP | 00.04 | all packages |
+| 0A DM850 bootloader | B200510231011 | not in any package (factory) |
+| 0A DM850 image | I200805270745 | 6.0.0.3 / 6.0.0.4 |
+
+The unit runs the latest vendor firmware (6.0.0.4). The DM850 fields are 13-char stamps
+padded with NULs to 20; the reply carries no DM850W/DM850D stamp.
+
+Port 5000 still gives no `C` reply with telnet working, so cause 4 stands: the decompiled
+updater (0x405D90) sends `RBUPDATE` *before* its first `C` on 5000 (`FUN_0041D270`, frame
+bytes identical to ours), and the normal-mode `C` answer assumed in loader-interface.md
+§2.6 step 1 is not seen on the live unit. See loader-interface.md §4 item 5.
