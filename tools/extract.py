@@ -21,6 +21,12 @@ import os, sys, struct, hashlib
 
 def pe_binary_resources(d):
     """Yield (name, bytes) for every RT 'BINARY' (named type) resource in a PE."""
+    for name, fo, size in pe_binary_resource_spans(d):
+        yield name, d[fo:fo + size]
+
+
+def pe_binary_resource_spans(d):
+    """Yield (name, file_offset, size) for every RT 'BINARY' (named type) resource."""
     pe = struct.unpack_from('<I', d, 0x3c)[0]
     nsec, optsz = struct.unpack_from('<H', d, pe + 6)[0], struct.unpack_from('<H', d, pe + 20)[0]
     opt = pe + 24
@@ -52,11 +58,10 @@ def pe_binary_resources(d):
                 yield from walk(base + (tgt & 0x7fffffff), p)
             else:
                 drva, dsz = struct.unpack_from('<II', d, base + tgt)
-                fo = r2o(drva)
-                yield p, d[fo:fo + dsz]
-    for path, blob in walk(base, []):
+                yield p, r2o(drva), dsz
+    for path, fo, dsz in walk(base, []):
         if path and path[0] == 'BINARY':
-            yield '/'.join(str(x) for x in path), blob
+            yield '/'.join(str(x) for x in path), fo, dsz
 
 
 def split_avtool3(blob):

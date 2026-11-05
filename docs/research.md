@@ -15,10 +15,18 @@ text-extracted; DJ Delorie, "Easy R8C/M16C/M32C/R32C Flash Programming" (2009).
   0xFFFE00–0xFFFFDB (`JMPS`/`JSRS`). All inside the excluded region → **the reset
   vector, fixed vectors and special-page table are in the resident boot block, not in
   any package.**
-- Flash erase blocks are 4 KB at the top ("4-Kbyte block erase time" in the electrical
-  table); the top 16 KB = four 4 KB blocks **[verify block map in hardware manual
-  REJ09B0180]**. 100 erase/program cycles guaranteed — relevant to Phase 1f test
-  flashing: budget the writes.
+- Flash block map (hardware manual REJ09B0180 Rev 1.50, Fig. 26.1): the top 16 KB is
+  block 2 = 8 KB (0xFFC000–0xFFDFFF), block 1 = 4 KB (0xFFE000–0xFFEFFF), block 0 =
+  4 KB (0xFFF000–0xFFFFFF). The package range 0xF00000–0xFFBFFF is blocks 3–20.
+  (Earlier text here said "four 4 KB blocks" — wrong.)
+- Endurance 100 program/erase cycles for **all** areas, data-flash block A included
+  (Table 27.10). Data retention 10 years minimum — the resident blocks 0–2 on the unit
+  are ~20 years old. Budget every write (docs/safety-plan.md).
+- The standard serial I/O program sits in a separate 4 KB factory boot ROM overlaid on
+  0xFFF000–0xFFFFFF, rewritable only by a parallel programmer (§26.1). Serial I/O mode
+  therefore survives any user-flash erase. ID mismatch only refuses commands — no
+  lockout, no auto-erase (§26.2.2); a reset vector of FFFFFFFFh skips the ID check;
+  ROMCP blocks parallel mode only. Application code can read all user flash.
 - SFRs 0x000000–0x0003FF; RAM 48 KB at 0x000400–0x00C3FF; 4 KB data flash at
   0x00F000–0x00FFFF (flash version).
 - CNVSS = L → single-chip mode; CNVSS = H → boot (serial I/O) mode. PM0 reads
@@ -113,7 +121,7 @@ package, not yet unpacked here).
 1. Nothing in the packages contains a reset vector or interrupt vector for MAIN or SUB;
    the resident boot blocks must be dumped from the unit (serial I/O mode, needs the ID
    code) before any byte-exact rebuild is complete.
-2. Flash endurance is 100 cycles (M32C/87) — count every test flash.
+2. Flash endurance is 100 cycles in all areas (M32C/87) — count every test flash.
 3. The DSP flash boot block (first 32 KB) and the DM850 flash are reachable only via
    JTAG (CX502, unfitted) or in-circuit reads; the DM850 JTAG landing is still unknown.
 4. The FWCV recovery package should be unpacked next: it may carry the DM850IMG and the
