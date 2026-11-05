@@ -165,10 +165,79 @@ UART1 RX ISR 0xF01704  ->  RX ring buffer 0x31A0/0x3196
                                                 + sub-handlers 0xF0227A / 0xF03FC8
 ```
 
+## Full command table (0xF87C3E)
+
+34 commands, PW…XS (id 0x2e onward is the accent/charset table, not commands). `id` is
+the token table value; `internal` is the remap via table 0xF87BE2 (indexed by id). The
+AVR-4306 serial command set.
+
+| tok | id | internal | meaning |
+|---|---|---|---|
+| PW | 0x01 | 0x0e | power |
+| MV | 0x02 | 0x01 | master volume |
+| CV | 0x03 | 0x05 | channel volume |
+| MU | 0x04 | 0x0a | mute |
+| SI | 0x08 | 0x09 | source select |
+| ZM | 0x09 | 0x0f | main zone |
+| SR | 0x0c | 0x13 | record source |
+| SV | 0x0d | 0x24 | video select |
+| SD | 0x0f | 0x141 | digital/analog select |
+| MS | 0x10 | 0x07 | surround mode |
+| PS | 0x11 | 0x07 | surround parameter |
+| TF | 0x13 | 0x17 | tuner frequency |
+| TP | 0x14 | 0x19 | tuner preset |
+| TM | 0x15 | 0x00 | tuner mode |
+| Z2 | 0x0a | 0x21 | zone 2 |
+| Z3 | 0x0b | 0x22 | zone 3 |
+| Z4 | 0x00 | 0x00 | zone 4 |
+| VI | 0x1b | 0x27 | — |
+| RB | 0x1c | 0x28 | — |
+| SY | 0x1d | 0x00 | system |
+| SS | 0x1f | 0x00 | speaker setup |
+| NS | 0x20 | 0x00 | net / iPod |
+| IP | 0x21 | 0x00 | — |
+| TX | 0x22 | 0x00 | — |
+| PD | 0x24 | 0x137 | — |
+| RR | 0x25 | 0x138 | — |
+| R1–R4 | 0x26–0x29 | 0x00 | — |
+| LS | 0x2a | 0x13d | — |
+| HD | 0x2b | 0x00 | HDMI |
+| VS | 0x2c | 0x00 | video select |
+| XS | 0x2d | 0x00 | — |
+
+## Dispatch architecture (why there is no flat handler table)
+
+The dispatcher (0xF4B42E) is called from four sites, and they are **nested**, not peers:
+
+- 0xF45F48 compares the id against ids directly (0x1c, 0x25, 0x2b, …) and calls the
+  group processor 0xF4B1C0.
+- 0xF4B1C0 calls the dispatcher, remaps id→internal (`indexws` at 0xF4B1FD, table
+  0xF87BE2), then the switch at 0xF4B206 dispatches internal numbers. Most arms are
+  **inline status queries** (`btst` on a state byte, return the bit); internal 14 (PW)
+  is the one that calls out — `jsr.a 0xF02332`.
+- 0xF461A2 calls the dispatcher, then a shared argument/value helper 0xF4B8FC, then
+  0xF463EF.
+- 0xF4B24D (inside the 0xF4B1C0 function) handles the query/response path, selecting
+  response strings from 0xF84E10.
+
+So a given command is routed through several of these levels depending on its id, its
+argument, and runtime state (current zone, mode). The handler is not a single
+table-indexed address; it is the leaf of nested id/internal switches. `indexws` + table
+0xF87BE2 remaps for one group only — which is why many commands map to internal 0 (not
+handled there) or to large values (0x141, 0x137…) that are indices into other
+structures, not switch arms.
+
+### What this means for enumeration
+
+A clean, complete token→handler table is **not statically recoverable** from the
+package: the leaf handler for most commands depends on the top-level command loop (which
+sits in the absent boot block) and on runtime state. The reliable way to get a specific
+command's handler is per-command live tracing — seed the full command and the parse
+state and run it in the sim, as done for PW (→0xF02332). The token→id and id→internal
+tables above are exact; the handler leaf below them is per-command work.
+
 ## What is not yet located
 
-- **The remaining per-command handlers.** PW is mapped end to end; the other commands'
-  handlers sit in the same switch chains across the four group sub-processors and can be
-  resolved the same way (seed the id, run from each group's `indexws`, read the switch
-  target). Not yet enumerated one by one.
+- **Most per-command handler leaves** — per the architecture above; obtained by
+  per-command live trace or by dumping the boot block so the real command loop runs.
 - The real program entry (`main`) — in the boot block, as above.
