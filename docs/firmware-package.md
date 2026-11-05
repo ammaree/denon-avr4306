@@ -102,6 +102,17 @@ uses the same container with **plain** payloads (checksum over raw bytes) — se
   block, which dispatches to the application.
 - Unchanged across the three releases.
 
+### 3.2a MAIN text/OSD tables
+
+MAIN has almost no C strings in its code area; its human-readable text is in display
+tables from 0xF7D7A5 onward (de-inverted addresses): FL-display and OSD strings for
+Room EQ / Audyssey modes, video-scaler output modes (480i/576i … 1080p), monitor type
+(HDMI/DVI), zone labels, and the full XM-radio status set (CAT, RADIO ID, SIGNAL, CHAN,
+NAME, TITLE, "CHECK ANTENNA", "NO SIGNAL", "OFF AIR"). The 2-letter control-protocol
+command words (PWON, MVUP, …) are **not** stored as plain strings, so the serial/TCP
+parser is a decode tree on the UART1/UART0 receive path, to be found by tracing those
+SFRs rather than by string search.
+
 ### 3.3 DSP — ADSP-21366
 
 - Inverted image: 0xFF (erased) from flash 0x8000 to 0xFFFF except a 2-byte `00 04` at
@@ -138,6 +149,22 @@ name at 0x70): length at 0x38, a 32-bit value at 0x34 = 0x400E0080 in the code i
 
 DM850I 2006 → 2008: 1,649,601 bytes differ — a new build. DM850IMG 11.22 (Feb 2006) is
 an older build still, 2,104,320 bytes.
+
+**Startup / memory map.** The ARM entry at file 0x88 is a standard scatter-load: an
+`ldm/stm` copy loop driven by a `(flag,src,dst,len)` table at 0x1A0, then a zero-fill
+loop, then a branch to the relocated `main`. Pointer-value histogram over the image
+(32-bit LE words landing in plausible ranges):
+
+| Region | pointer count | reading |
+|---|---|---|
+| 0x00000000–0x002FFFFF | ~29,000 | file-relative / small constants |
+| 0x40000000–0x401FFFFF | ~250 | on-chip RAM; `bCoD` header load value 0x400E0080 is here — tightly-coupled code/vectors |
+| 0x60000000–0x603FFFFF | ~21,800 | external SDRAM (IS42S16400, 8 MB at CS/MEMCLK); bulk of code+data runs here, concentrated at 0x601xxxxx |
+
+So the module copies itself from flash into SDRAM at ~0x60100000 and keeps a small
+fast region near 0x400E0000. This is the link map to use when loading the image into a
+disassembler. **[verify exact SDRAM base and on-chip RAM size against a DM850 memory
+map — none public yet]**.
 
 ### 3.5 DM850W / DM850D — web pages
 
