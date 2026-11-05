@@ -287,8 +287,8 @@ flash when handing over (§1.4a); the unit-side version for the skip comes from 
 6. Who answers `C(1)` / `S(1, …)` in update mode: the update agent (§1.4b) ignores frames
    for target 1 except `U`/`X`, so it is probably the loader in blocks 0–2. Settled by
    the first `read`.
-7. Whether the DM850 passes `VI?` on 5000 to MAIN in normal mode (vendor relies on it;
-   not yet tried on the unit; a read-only check).
+7. ~~Whether the DM850 passes `VI?` on 5000 to MAIN in normal mode.~~ **Answered:** yes,
+   same reply as on port 23 (live unit 2026-11-05 21:49, lan-access.md).
 
 Tooling: Ghidra 12.2 headless with a locally built macOS arm64 decompiler
 ([tools/ghidra/](../tools/ghidra/)); pe_xref.py for quick string/import lookups.

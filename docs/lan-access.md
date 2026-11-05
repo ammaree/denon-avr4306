@@ -166,3 +166,14 @@ Port 5000 still gives no `C` reply with telnet working. This is expected: the ve
 tool sends `C` only after `RBUPDATE`, or as a fallback when `VI?` fails
 (loader-interface.md §2.1, settled offline the same evening). A normal-mode unit is
 checked with `VI?`.
+
+### `VI?` on TCP 5000 (2026-11-05 21:49)
+
+| Step | Result |
+|---|---|
+| ping ×2 | 0 % loss |
+| `version --control-port 5000`: `VI?` | **reply in 13 ms**, identical to the port 23 reply |
+| ping ×2 afterwards | 0 % loss |
+
+The DM850 passes control lines on 5000 through to MAIN in normal mode, as the vendor
+update flow requires. The first step of `loader_client.py read` works on this unit.
