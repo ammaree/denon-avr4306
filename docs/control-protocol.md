@@ -121,11 +121,54 @@ token 'QQ' -> command id 0x0000      # unknown -> no match
 
 Each matches the table, run against the real firmware bytes in the simulator.
 
+## Per-command handlers (0xF4B1C0 → … → 0xF02332 for PW)
+
+The command processor at **0xF4B1C0** takes the id and reaches a handler in three more
+steps (all confirmed by executing the real bytes in the sim):
+
+1. **id → internal command number**, via the M32C `indexws` jump-table idiom at
+   **0xF4B1FD** (`indexws.b -2[fb]` then an indexed load) through a second table at
+   **0xF87BE2** (word entries). Example: PW id 0x01 → internal 14; ZM id 0x09 →
+   internal 15.
+2. **internal number → handler**, via a `cmp.w #N / jeq` switch starting at
+   **0xF4B206**. Internal 14 (`cmp.w #14` at 0xF4B208) → `jeq 0xF4B21A` →
+   `jsr.a 0xF02332`.
+3. **handler** 0xF02332 is the **power (PW) handler**: it reads/writes the power/zone
+   state bytes at RAM 0x320B/0x320C/0x320F (`btst 5,0x320C`, …) and calls sub-handlers
+   0xF0227A and 0xF03FC8 that drive the actual power control.
+
+The parser is split into command **groups**: the dispatcher (0xF4B42E) is called from
+four sites — 0xF45F48, 0xF461A2, 0xF4B1F7, 0xF4B24D — each a sub-processor with its own
+`indexws`/switch for a group of commands (power/zone, source, tuner, response queries,
+…). The 0xF4B24D path, for queries, selects a response string from the tables at
+0xF84E10 (null-terminated, id-prefixed: `iRadio`, `mServer`, `SDEFL`, …).
+
+### Resolve a handler (repro)
+
+The id → handler jump is exercised directly by seeding the id at -2[fb] and running from
+0xF4B1FD; the sim then follows the indexed remap and switch to the real target:
+
+```
+id 0x01 (PW) -> internal 14 -> jsr.a 0xF02332   # power handler
+```
+
+## Full chain
+
+```
+UART1 RX ISR 0xF01704  ->  RX ring buffer 0x31A0/0x3196
+  ->  dequeue 0xF01242
+  ->  command processor 0xF4B1C0  (+ group sub-processors 0xF45F48 / 0xF461A2)
+      ->  token->id      dispatcher 0xF4B42E   via table 0xF87C3E
+      ->  id->internal   indexws   0xF4B1FD    via table 0xF87BE2
+      ->  internal->handler switch 0xF4B206
+          ->  handler, e.g. PW = 0xF02332  ->  power state 0x320B/0x320C/0x320F
+                                                + sub-handlers 0xF0227A / 0xF03FC8
+```
+
 ## What is not yet located
 
-- **The per-command handlers.** The dispatcher returns a command id; the handler each
-  id selects (the jump/switch that acts on `PW`, `MV`, … and their arguments) is the
-  next layer out, reached by `jsr.w` PC-relative calls that carry no absolute target to
-  byte-search. Follow it live by stepping on from 0xF4B42E's return with the id set, or
-  dump the boot block and boot the parser in its real context.
+- **The remaining per-command handlers.** PW is mapped end to end; the other commands'
+  handlers sit in the same switch chains across the four group sub-processors and can be
+  resolved the same way (seed the id, run from each group's `indexws`, read the switch
+  target). Not yet enumerated one by one.
 - The real program entry (`main`) — in the boot block, as above.
