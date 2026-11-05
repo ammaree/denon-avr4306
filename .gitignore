@@ -2,6 +2,7 @@
 # Keep them local only; never commit or push them.
 orig/
 dumps/
+build/
 *.exe
 *.zip
 *.cab
@@ -11,7 +12,6 @@ dumps/
 *.bid
 
 # Build output
-build/
 *.o
 *.map
 *.lst
