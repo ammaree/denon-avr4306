@@ -12,6 +12,7 @@ build/
 *.bid
 
 # Build output
+__pycache__/
 *.o
 *.map
 *.lst
