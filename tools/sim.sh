@@ -117,5 +117,36 @@ rxdemo)
     | grep -aE 'MEM\[0002ee\]|MEM\[003200\]|MEM\[0031a0\] <=' | head -8
   echo "expect: U1RB read =>P, then MEM[003200] <= 50, then 0031a0 advances to 3201" ;;
 
+dispdemo)
+  # Run the command dispatcher (0xF4B42E) on a 2-char token: build a "<TOK>\r"
+  # buffer in RAM, pass its pointer, and print the command id it returns by
+  # scanning the token table at 0xF87C3E. Default token PW (expect id 0x0001).
+  TOK=${2:-PW}; IMG=${3:-build/images/MAIN_01.00.flash.bin}
+  C0=$(printf '%d' "'$(printf %s "$TOK" | cut -c1)")
+  C1=$(printf '%d' "'$(printf %s "$TOK" | cut -c2)")
+  printf '\t.section .image,"a",@progbits\n\t.incbin "%s"\n' "$IMG" > "$OUT/image.s"
+  "$AS" -m32c -o "$OUT/image.o" "$OUT/image.s"
+  cat > "$OUT/disp.s" <<ASM
+	.section .stub,"ax",@progbits
+	.global _stub
+_stub:
+	ldc #0x00C000, sp
+	ldc #0x000400, sb
+	mov.b #$C0, 0x3300
+	mov.b #$C1, 0x3301
+	mov.b #0x0d, 0x3302
+	push.l #0x00003300
+	jsr.a 0xF4B42E
+	mov.w r0, 0x402
+	mov.b #1, 0x400
+1:	jmp.b 1b
+ASM
+  "$AS" -m32c -o "$OUT/disp.o" "$OUT/disp.s"
+  "$LD" -T "$HERE/sim/image_boot.ld" --defsym IMAGE_VMA=0xF00000 --defsym START_ADDR=0xF4B42E \
+        -o "$OUT/disp.elf" "$OUT/image.o" "$OUT/disp.o"
+  "$OC" -O srec "$OUT/disp.elf" "$OUT/disp.srec"
+  id=$(cap 4 -m m32c "$OUT/disp.srec" | perl -ne 'print $1 if /SimTrace:\s+\S+\s+(\S+)/' | head -1)
+  echo "token '$TOK' -> command id 0x$id (0x0000 = no match)" ;;
+
 *) sed -n '2,20p' "$0"; exit 1 ;;
 esac

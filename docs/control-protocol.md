@@ -37,6 +37,8 @@ through — the control-protocol front-end.
 | **0xF01704** | **UART1 receive ISR** | reads U1RB(0x2EE), clears U1C1 error bits, stores byte to RX ring buffer |
 | 0xF01242 | **RX dequeue** (parser input primitive) | reads RX control block 0x3196/0x31A0–0x31A6, ring wrap/empty check |
 | 0xF013B6 | RX dequeue sibling | same control block |
+| **0xF4B42E** | **command dispatcher** | `enter #4`; scans the token table at 0xF87C3E (i*4 stride), returns the matched command id |
+| **0xF87C3E** | **command token table** | 4-byte entries `{char token[2]; u16 id}`, ~35 entries, ends ~0xF87CC6 |
 
 ### RAM
 
@@ -78,13 +80,52 @@ U1RB, enqueues to the 0x31A0/0x3196 ring buffer, and advances the pointer. Witho
 seed the ISR halts at the `[a0]` store because 0x31A0 is 0 — the direct consequence of
 the missing startup.
 
+## Command dispatch (0xF4B42E → table 0xF87C3E)
+
+The dispatcher takes a pointer to the received command string (argument at 8[fb]) and
+scans the token table at 0xF87C3E. Each table entry is 4 bytes: `token[0] token[1] 00
+id`. The scan computes `i*4` (`shl #2`), compares the two token bytes
+(0xF87C3E+i*4, 0xF87C3F+i*4) against the command string, and on a match returns the id
+byte (0xF87C41+i*4) in r0; an unknown token returns 0. CR (0x0D) marks end of command.
+
+Found by searching the image for clustered Denon command tokens (the table) and then
+for references to the table address (the two refs at 0xF4B44B/0xF4B4B1 are both inside
+0xF4B42E). The table is distinct from the OSD/display string table just before it
+(0xF87AB0, fixed-width padded strings like `THX MODE:RIGHT`, `NIGHT:ON`).
+
+### Token → id
+
+```
+PW 01  MV 02  CV 03  MU 04  SI 08  ZM 09  SR 0c  SV 0d  SD 0f  MS 10
+PS 11  TF 13  TP 14  TM 15  Z2 0a  Z3 0b  Z4 00  VI 1b  RB 1c  SY 1d
+SS 1f  NS 20  IP 21  TX 22  PD 24  RR 25  R1 26  R2 27  R3 28  R4 29
+LS 2a  HD 2b  VS 2c  XS 2d
+```
+
+(The AVR-4306 serial command set: PW power, MV master volume, CV channel volume,
+MU mute, SI source select, ZM/Z2/Z3/Z4 zones, MS surround mode, PS parameters,
+TF/TP/TM tuner, SY system, NS net/iPod, etc.)
+
+### Live confirmation (shim)
+
+`sh tools/sim.sh dispdemo <TOK>` builds a `"<TOK>\r"` buffer in RAM, passes its
+pointer, calls 0xF4B42E, and prints the returned id:
+
+```
+token 'PW' -> command id 0x0001      # reads f87c3e=>'P' f87c3f=>'W' f87c41=>01
+token 'MS' -> command id 0x0010
+token 'ZM' -> command id 0x0009
+token 'VS' -> command id 0x002c
+token 'QQ' -> command id 0x0000      # unknown -> no match
+```
+
+Each matches the table, run against the real firmware bytes in the simulator.
+
 ## What is not yet located
 
-- **The command-dispatch table** (the 2-char Denon token → handler matcher). It is
-  reached from the RX dequeue (0xF01242) through `jsr.w` PC-relative calls, which carry
-  no absolute target to byte-search, and the dispatch itself builds response strings
-  from 2-char tokens rather than storing them literally, so a string search does not
-  pin it. Next step: trace outward from 0xF01242 live (feed a full `XXnn\r` command
-  with the ring buffer and enough global state seeded), or dump the boot block and boot
-  from reset so the parser runs in its real context.
+- **The per-command handlers.** The dispatcher returns a command id; the handler each
+  id selects (the jump/switch that acts on `PW`, `MV`, … and their arguments) is the
+  next layer out, reached by `jsr.w` PC-relative calls that carry no absolute target to
+  byte-search. Follow it live by stepping on from 0xF4B42E's return with the id set, or
+  dump the boot block and boot the parser in its real context.
 - The real program entry (`main`) — in the boot block, as above.
