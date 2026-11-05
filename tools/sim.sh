@@ -101,5 +101,21 @@ feed)
     | perl -pe 's/\e\[31m.\e\[0m//g; s/\e\[[0-9;]*m//g' > "$OUT/feed.tx" || true
   echo "TX capture: $OUT/feed.tx ($(wc -c < "$OUT/feed.tx") bytes)" ;;
 
+rxdemo)
+  # Demonstrate the UART1 receive ISR (0xF01704): seed the RX ring-buffer pointer
+  # (sim/rx_seed.s, standing in for the absent startup), feed one byte, and show it
+  # land in the buffer at 0x3200. Confirms the control-protocol receive front-end.
+  IMG=${2:-build/images/MAIN_01.00.flash.bin}
+  printf '\t.section .image,"a",@progbits\n\t.incbin "%s"\n' "$IMG" > "$OUT/image.s"
+  "$AS" -m32c -o "$OUT/image.o" "$OUT/image.s"
+  "$AS" -m32c -o "$OUT/rx_seed.o" "$HERE/sim/rx_seed.s"
+  "$LD" -T "$HERE/sim/image_boot.ld" --defsym IMAGE_VMA=0xF00000 --defsym START_ADDR=0xF01704 \
+        -o "$OUT/rx.elf" "$OUT/image.o" "$OUT/rx_seed.o"
+  "$OC" -O srec "$OUT/rx.elf" "$OUT/rx.srec"
+  echo "feeding 'P' (0x50) into UART1 RX ISR 0xF01704:"
+  printf 'P' | cap 3 -d -t -m m32c "$OUT/rx.srec" | perl -pe 's/\e\[[0-9;]*m//g' \
+    | grep -aE 'MEM\[0002ee\]|MEM\[003200\]|MEM\[0031a0\] <=' | head -8
+  echo "expect: U1RB read =>P, then MEM[003200] <= 50, then 0031a0 advances to 3201" ;;
+
 *) sed -n '2,20p' "$0"; exit 1 ;;
 esac
