@@ -89,3 +89,32 @@ The channel set (FL/FR/C/SW/SL/SR/SB/SBL/SBR) confirms the AVR-4306 7.1+SB layou
 model/firmware/version string appeared in the control pages. The web POSTs go to the
 `.asp` pages, which the DM850 turns into control commands to MAIN over UART0 — the same
 protocol decoded in control-protocol.md.
+
+## Loader-client checks (2026-11-05 20:05, tools/loader_client.py)
+
+Normal mode only; the same first steps the vendor updater takes.
+
+| Step | Result |
+|---|---|
+| ping ×3 | 0 % loss; ARP 00:05:CD:13:81:94 |
+| `version`: telnet TCP 23, `VI?` | **connection refused** |
+| `check`: TCP 5000, `C` frame `aa 43 01 ee` | connect accepted; **no reply in 6 s** |
+| ping ×2 afterwards | 0 % loss — DM850 still up |
+
+TCP 23 is the documented control port (protocol spec 4.6a, p. 2: "TCP port 23
+(telnet)", no enable setting; the only network option is Standby Mode Power Saving).
+It has been closed in every observation of this unit (first scan: only 80, 5000, 6666,
+8080 open). The vendor updater connects to 23 *before* it uses 5000, so the silent 5000
+may follow from the same cause.
+
+Candidate causes, not yet distinguished:
+1. The receiver was in standby (vendor manual requires power on, green indicator).
+2. Another client holds the single telnet session (home-automation or app), so new
+   connections are refused.
+3. The DM850's telnet service is down while its web server still runs (the module has
+   already been seen to hang partially; docs above).
+4. Port 5000 bridges to MAIN only in a state the telnet step sets up.
+
+Next checks need the user at the unit: power state, other controllers on the LAN, then
+one retry after a full AC power-cycle, then the rear RS-232 port (9600 8N1, same
+`VI?`) to separate a DM850 fault from a MAIN fault.
