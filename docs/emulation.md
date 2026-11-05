@@ -33,6 +33,67 @@ The modelled UART1 is the same UART the AVR-4306 main µcom uses for the RS-232 
 protocol (schematic-notes.md). That makes the sim usable later for exercising the
 control-protocol parser once the parser is located and a minimal input path is stubbed.
 
+## The board shim
+
+The sim models the CPU, RAM/ROM, UART1 and timer A. Three gaps stop it short of a
+board: there is no reset entry (the boot block is absent), real routines fault the
+instant an `[fb]`/`[sb]` access lands near 0 with the pointers uninitialised, and
+peripherals other than UART1/timer are unmodelled. The shim closes the first two and
+makes the third observable. All of it is in [tools/sim.sh](../tools/sim.sh) and
+[sim/](../sim); nothing patches the sim binary.
+
+### Bootstrap stub ([sim/boot_stub.s](../sim/boot_stub.s))
+
+Stands in for the missing 16 KB boot block (0xFFC000-0xFFFFFF). It sets SP/FB/SB to
+valid internal-RAM addresses and jumps to a chosen entry; the linker script
+[sim/image_boot.ld](../sim/image_boot.ld) places it in the empty boot-block region and
+points the reset vector (0xFFFFFC) at it. The values are valid, not authentic — enough
+to keep memory accesses inside the 48 KB RAM window so a routine runs far enough to
+observe, not a reproduction of real boot state. Verified: with FB/SB set, fb-relative
+and sb-relative load/stores resolve into RAM instead of halting at 0 (the sim's only
+hard fault is a dereference of address 0 — every other unmodelled address reads 0 and
+absorbs writes, so firmware stalls rather than crashes).
+
+```bash
+sh tools/sim.sh boot build/images/MAIN_01.00.flash.bin 0xF00000 <entry_hex> 3
+```
+
+### SFR peripheral tracer
+
+`-t` prints every memory access as `MEM[addr] => v` / `<= v`. The `trace` mode boots via
+the stub, captures the trace, and filters it to the SFR page (0x000000-0x0003ff),
+giving a per-address access count — what peripherals a routine touches and in what
+order. Modelled SFRs (UART1 RX/status/TX at 0x2ee/0x2ed/0x2ea, timer A) are intercepted
+before the trace print, so the tracer surfaces exactly the *unmodelled* traffic — the
+registers a fuller board model would need next.
+
+```bash
+sh tools/sim.sh trace build/images/MAIN_01.00.flash.bin 0xF00000 0xF00000 3
+# -> build/sim/raw.trace (full), build/sim/sfr.log (SFR page), address histogram
+```
+
+### Scripted UART1 bridge
+
+The sim already wires UART1 to the console: a write to U1TB (0x2ea) goes to stdout, a
+read of U1RB (0x2ee) takes a byte from stdin, and U1C1 (0x2ed) reports RX-ready from
+stdin readiness. That is a scripted-controller bridge on the same UART block the MAIN
+µcom uses (0x2e8-0x2ef; confirmed — MAIN initialises U1MR at 0x2e8 and polls U1C1 at
+0x2ed). `feed` pipes a byte file into RX and captures TX (stripping the sim's red
+RX-tap echo):
+
+```bash
+printf '\x40\x31\x3f' > /tmp/cmd.bin          # example framed bytes
+sh tools/sim.sh feed build/images/MAIN_01.00.flash.bin 0xF00000 <entry_hex> /tmp/cmd.bin 4
+# -> build/sim/feed.tx
+```
+
+`uarttest` self-checks the bridge against an echo program (fed `denon4306`, expects TX
+`DENON4306`):
+
+```bash
+sh tools/sim.sh uarttest      # -> UART-BRIDGE PASS
+```
+
 ## What works now
 
 ```bash
@@ -48,41 +109,32 @@ SimTrace: f00016 0015     # 7 * 3
 SELF-TEST PASS
 ```
 
-This proves the whole **assemble → link → simulate** loop — the exact loop a rebuilt
-image (asm or C→asm) will be validated through.
-
-### Running real firmware code
-
-```bash
-sh tools/sim.sh run build/images/MAIN_01.00.flash.bin 0xF00000 0xF0D58E 3
-```
-
-`sim.sh run` wraps the raw image into an ELF at its true load address, synthesizes the
-M32C reset vector at 0xFFFFFC (missing from the package — it lives in the boot block) to
-point at the chosen start, converts to SREC (the sim boots an SREC from the reset
-vector), and runs. The example executes the real function at 0xF0D58E — the sim decodes
-`mov.w:z #0,0x3f0d; mov.w:z #0,0x3f21; add.b:q #7,-8226[fb]`, identical to objdump, then
-stops with "NULL pointer dereference" when the `[fb]`-relative access runs with FB
-uninitialised.
+This proves the whole **assemble -> link -> simulate** loop — the exact loop a rebuilt
+image (asm or C->asm) will be validated through. `uarttest` proves the UART1 bridge end
+to end, and `boot`/`trace` run real MAIN code through the bootstrap stub.
 
 ## Limits (why this is not yet a full-system boot)
 
-1. **No board model.** The sim models the CPU, RAM/ROM, UART1 and timer A only — not the
-   PCA9555 expanders, tuner, DAtuner, DSP/sub-µcom links, or the DM850. Firmware that
-   reads an unmodelled SFR or polls a peripheral diverges or faults immediately.
-2. **No reset entry.** The real reset vector and startup (stack/FB/SB setup, RAM init)
-   are in the boot block that no package contains. Running from reset needs that block
-   dumped from the unit (re-plan.md 1b). `sim.sh run` starts at a chosen address with
-   uninitialised registers, so it only smoke-tests straight-line code, not whole
-   functions.
-3. Addresses 0x400–0x402 are hijacked by the sim's semihosting and overlap real M32C RAM
-   (0x400+); irrelevant for the self-test, a minor caveat when modelling RAM behaviour.
+1. **No reset entry / no parser-in-context.** The real reset vector and C startup live
+   in the absent boot block, so the true program entry is unknown. `boot`/`trace`/`feed`
+   start at an address you choose; a mid-function address still faults once it needs a
+   frame or global the startup would have built. Running the host control-protocol
+   parser end to end needs either the MAIN boot block dumped from the unit (re-plan.md
+   1b) or the C-startup located by hand — and the CGEN disassembler misaligns too often
+   (firmware-package.md 8) to locate function entries reliably from the static listing.
+2. **No board model.** Only CPU, RAM/ROM, UART1 and timer A are modelled. The tracer
+   shows the rest as unmodelled SFR traffic (e.g. the 0xF00000 path touches a control
+   SFR at 0x396); a real run needs PCA9555, tuner, DSP/sub links and DM850 modelled, or
+   their status bits satisfied, so polling loops advance.
+3. Addresses 0x400-0x402 are the sim's semihosting and overlap real M32C RAM; harmless
+   for the harness, a caveat when modelling RAM at those addresses.
 
 ## Next steps toward objective d
 
-- Build a board-peripheral shim (UART1 bridge to a scripted controller, PCA9555/relay
-  capture, encoder/IR injection) as a small sim patch or an LD_PRELOAD on the syscall
-  hooks — enough to run the control-protocol parser.
-- Dump the MAIN boot block from the unit to get a real reset path, then boot from reset.
+- Dump the MAIN boot block from the unit to get the real reset vector, then boot from
+  reset through the stub-free path — the one change that turns smoke runs into a real
+  boot.
+- Model (or stub the status bits of) the next peripherals the tracer flags, so a booted
+  image clears its init polling loops.
 - For the DSP (SHARC) and DM850 (ARM) there is no free cycle-accurate sim here; test
   those by image hash and, for the DM850, under QEMU-arm once its load map is confirmed.
