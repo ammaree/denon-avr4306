@@ -85,6 +85,13 @@ no path reads MAIN/SUB/DSP flash (lan-access.md), so the boot block cannot come 
 network. The DM850 also hangs under load (the "LAN not connecting" symptom). The
 boot-block dump therefore requires the bench serial-I/O / JTAG route in re-plan.md §1f.
 
+The enabling software for that route is ready: [tools/mcu_dump.py](../tools/mcu_dump.py)
+is a **read-only** M32C/M16C standard serial-I/O-mode flash reader (auto-baud, version,
+ID verify, page read — no erase/program). On a bench machine with a 3.3 V USB-serial
+adapter wired to the MAIN/SUB serial-I/O pins and the part held in boot mode, it dumps
+0xFFC000–0xFFFFFF (the boot block) to dumps/ with a sha256. That is the one remaining
+step, and it needs hardware access, not more analysis.
+
 ## Bottom line
 
 Objectives (a)–(c) are complete; (d) is complete for what Phase 1 can cover (a validated
