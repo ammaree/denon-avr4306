@@ -118,3 +118,20 @@ Candidate causes, not yet distinguished:
 Next checks need the user at the unit: power state, other controllers on the LAN, then
 one retry after a full AC power-cycle, then the rear RS-232 port (9600 8N1, same
 `VI?`) to separate a DM850 fault from a MAIN fault.
+
+### Retry 2026-11-05 21:35
+
+The user found a home-automation device controlling the unit and switched it off at
+21:25. Retry 10 min later, receiver not power-cycled:
+
+| Step | Result |
+|---|---|
+| ping ×2 | 0 % loss |
+| `version`: telnet TCP 23, `VI?` | **connection refused** (unchanged) |
+| `check`: TCP 5000, `C` frame | connect accepted; **no reply in 6 s** (unchanged) |
+| ping ×2 afterwards | 0 % loss |
+
+Switching the controller off does not close its TCP session: it sends no FIN, so the
+DM850 may still hold the session as open until a keep-alive timeout, if it has one.
+Cause 2 is therefore not ruled out. Next: AC power-cycle the receiver with the
+controller still off, wait 1 min after power-on, retry once.
