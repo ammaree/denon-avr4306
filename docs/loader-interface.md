@@ -57,6 +57,29 @@ likely user settings in data-flash block A (no settings EEPROM is fitted on the 
 board). **Wear consequence:** block A is rated 100 cycles; how often it is written (each
 standby? only on change?) must be established before any wear budget is trusted.
 
+### 1.4a How the application hands over to the loader (decompiled, Ghidra M16C/80)
+
+Ghidra's M16C/80 processor module decodes the M32C/87 image correctly (validated on the
+UART1 RX ISR 0xF01704 and dispatcher 0xF4B42E, both matching the Phase 1 emulator
+results). All five `jmp.a 0xFFC09F` sites were decompiled:
+
+- **RAM 0x0400 is a mode word** shared with the loader. `set_mode` = 0xF00156 (stores
+  the value if < 0x1C), `get_mode` = 0xF00166. Callers of set_mode: 0xF32336, 0xF354CE,
+  0xF3557C, 0xF37BA2, 0xF4C41D.
+- **0xF008E4** handles loader frames received on UART1 (the rear RS-232 port) and replies
+  `A`/`N` on U1TB. Frame byte 3 selects a mode (1→4, 2→5, 3→6, 4→7, 5→8, 8→0x0B, 9→0x0E,
+  10→0x0C, 11→0x0D); it ACKs, counts down 100 ticks, resets the flash controller
+  (FMR0 bits 3/1) and jumps to 0xFFC09F.
+- **0xF01A12** is the same without the UART1 reply (the DM850-link path), with
+  6→0x0A and 7→0x09 added.
+- **0xF3557C** calls set_mode, then jumps (front-panel/state-machine path in 0xF3512A).
+- **The application writes no flash on any of these paths.** The jump is warm (RAM
+  survives), which is why the updater can read the parameter RAM afterwards.
+- At start-up **0xF4C326** reads the mode word: values 0x18/0x19/0x1A are acted on and
+  cleared with set_mode(0); it also checks the parameter area's last word at RAM 0x2700.
+
+What Denon's loader does with each mode value is in blocks 0–2 and still unknown.
+
 ### 1.5 Free space for patches (confirmed)
 
 One contiguous erased run **0xFA969A–0xFFBD7B (337,634 bytes)**. Everything from
@@ -149,6 +172,43 @@ parameter restore.
 CPLDL. No vendor package contains one and avtool3_pack.py can only emit vendor image
 names, so it cannot run for our builds.
 
+### 2.6 Session sequence, reply details, exit
+
+From the updater state machine (0x405CB0), `FUN_0041E910`, `FUN_0041EA60` and the vendor
+manual (Upgrade Manual 2008-09-12, §3.7–3.9):
+
+1. **Check communication** (normal mode): TCP 5000, `C` frame → `C` reply. The running
+   application answers AA frames arriving from the DM850 link (0xF01A12).
+2. **Request Version**: telnet `VI?\r`, reply starts `VI`. `VI` is a control-protocol
+   token (id 0x1B). This reply is the unit-side version used by the same-version skip.
+3. **Reboot(Update Mode)**: telnet `RBUPDATE\r`, expect `RBSTART`, up to 3 tries.
+4. Per image: `[01:MAIN] Updating start` → parameter backup (`S` of RAM) → **Erasing**
+   (during `L`) → data → verify read-back → parameter restore.
+5. **Exit:** the manual tells the user to switch the unit off after "Update completed",
+   remove the connection, and switch it on. A failed update is handled the same way:
+   power off, check cable, power on, retry. There is no explicit "return to
+   application" command on the MAIN side.
+
+Frames on TCP 5000 are raw (`FUN_004203E0` = `send()`), no encapsulation.
+
+Data frame layout (decoder `FUN_0041E760`): `AA type tgt status len16 addr32 payload ck`,
+status 0 = only, 1 = first, 2 = middle, 3 = last. After each data frame the PC sends ACK
+`AA 'A' tgt ck` (`FUN_00419870`) or NACK `AA 'N' tgt ck` (`FUN_004198C0`).
+
+The UI has a **"Disable pass."** checkbox: it turns off the same-version skip, so a
+vendor image of the same version can be re-flashed (simplifies safety-plan Stage 2).
+
+### 2.7 Read-only client
+
+[tools/loader_client.py](../tools/loader_client.py) implements only steps 1–3 plus a
+single `S` read: `version` (`VI?`), `check` (`C`), `read` (`C` → `RBUPDATE`/`RBSTART` →
+`C` → `S(start,end)` → ACK per frame). Its frame builder refuses anything but C, S, A,
+N; `read` needs `--confirm-update-mode`; connections are paced. Tested against
+[sim/fake_unit.py](../sim/fake_unit.py) (a local peer implementing §2.4–2.6): blocks
+0–2 pattern and a 128 KB application range read back byte-exact, also with every 5th
+data frame corrupted (NACK/retry). The fake encodes this document's reading of the
+protocol; it does not prove the real loader behaves the same.
+
 ## 3. bCoD and AVTOOL3 (solved — see tools)
 
 - AVTOOL3 container: rebuilt byte-for-byte for all 10 vendor containers
@@ -162,19 +222,18 @@ names, so it cannot run for our builds.
 Answered: frame format (§2.4), read command exists (`S`, §2.4), VME stage cannot run
 (§2.5), ranges are sent explicitly from the header (§2.4 `L`).
 
-1. Same-version skip: the version check compares strings, but the decompile does not show
-   which unit-side string it uses (identity string at 0xFFBE80 is the candidate). Needed
-   so patched builds are not skipped.
+Also answered: exit from update mode = power cycle (§2.6); the application writes no
+flash when handing over (§1.4a); the unit-side version for the skip comes from `VI?`
+(§2.6); the serial path speaks the same protocol and MAIN serves loader frames on UART1
+(§1.4a, 0xF008E4).
+
+1. How MAIN builds the `VI?` reply (identity string at 0xFFBE80 is the candidate), so a
+   patched build reports a new version and is not skipped.
 2. Does Denon's loader erase only the `L` range, or all of blocks 3–20? Does it filter
-   `S` ranges? (Answerable only from blocks 0–2 — or by a read-only `S` probe.)
-3. The command that returns the unit from update mode to application mode, and what
-   entering update mode changes (any erase or persistent flag on entry?). Needed before
-   a read-only `S` session is run on the unit.
-4. Serial path target (§2.3).
-5. "Recovering DM800" (0x40661D): how a dead DM850 is reached.
-6. RB in MAIN: id 0x1C → internal 0x28 is not handled by the 0xF4B206 group switch
-   (default exit at 0xF4B2DC); the handling group (0xF45F48 / 0xF461A2 / 0xF4B24D) is
-   still to trace. Then the path from `RBUPDATE` to `jmp 0xFFC09F`.
+   `S` ranges? What does it do with each mode value? (Answered by the blocks 0–2 read.)
+3. "Recovering DM800" (0x40661D → `FUN_004090A0`): how a dead DM850 is reached.
+4. Which control-protocol handler turns ASCII `RBUPDATE` into set_mode + jump (RB is not
+   in the 0xF4B206 group; the five set_mode callers are listed in §1.4a).
 
 Tooling: Ghidra 12.2 headless with a locally built macOS arm64 decompiler
 ([tools/ghidra/](../tools/ghidra/)); pe_xref.py for quick string/import lookups.
