@@ -25,6 +25,15 @@ Read-only by default: only query commands are sent, never a state change (no pow
 volume, input switch). State-changing use is intentionally not implemented here. Point
 it only at your own unit on your own LAN.
 
+Observed on the real unit (2026-11-05)
+--------------------------------------
+192.168.1.13 (MAC 00:05:CD:13:81:94, D&M Holdings) answered ping and served a
+GoAhead-Webs frameset on :80 with open TCP :80/:5000/:6666/:8080 — then went fully
+unreachable (no ICMP, no TCP) after a modest amount of probing. The DM850 network
+module hangs under load and drops the whole stack; a full AC power-cycle brings it back.
+This is why the HTTP pass is serial and slow and there is no port scan here: hammering
+the module wedges it. Run this once, gently, right after a power-cycle.
+
 Usage
 -----
   python3 tools/lan_dump.py --discover
@@ -86,17 +95,27 @@ def ssdp_discover(timeout=4.0):
 
 
 def http_get(url, timeout=5.0):
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            return r.status, r.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read() if hasattr(e, "read") else b""
-    except Exception as e:
-        return None, str(e).encode()
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read() if hasattr(e, "read") else b""
+        except Exception as e:
+            if attempt == 2:
+                return None, str(e).encode()
+            time.sleep(1.5 * (attempt + 1))   # back off; the DM850 web server is fragile
+    return None, b""
 
 
-def http_dump(ip, od, location=""):
-    """Fetch the device-description and a few common DM850 web paths."""
+def http_dump(ip, od, location="", delay=1.5):
+    """Fetch the device-description and a few common DM850 web paths.
+
+    The DM850 runs a tiny GoAhead-Webs server that serves ~one connection at a time
+    and wedges (and can take the whole network stack down with it) under rapid or
+    concurrent requests. So this is deliberately serial and slow: one request, a pause,
+    retries with back-off. Do not parallelise it or add a port scan against this unit.
+    """
     paths = ["/", "/description.xml", "/device.xml", "/ServerDesc.xml",
              "/index.html", "/index.htm", "/web/index.html", "/setup.html"]
     urls = []
@@ -111,6 +130,7 @@ def http_dump(ip, od, location=""):
             with open(os.path.join(od, "http_" + name), "wb") as f:
                 f.write(body)
         log.append("%-55s -> %s (%s bytes)" % (u, status, len(body) if body else 0))
+        time.sleep(delay)                     # give the embedded server room to recover
     with open(os.path.join(od, "http_index.txt"), "w") as f:
         f.write("\n".join(log) + "\n")
     print("  http: tried %d URLs; see %s/http_index.txt" % (len(urls), od))
@@ -167,6 +187,8 @@ def main():
     ap.add_argument("--control-port", type=int, default=23,
                     help="raw Denon control TCP port (default 23)")
     ap.add_argument("--discover-timeout", type=float, default=4.0)
+    ap.add_argument("--delay", type=float, default=1.5,
+                    help="seconds between HTTP requests (the DM850 server is fragile)")
     args = ap.parse_args()
 
     print("# SSDP discovery")
@@ -187,7 +209,7 @@ def main():
     od = outdir()
     print("# dumping %s -> %s" % (ip, od))
     location = found.get(ip, ("", ""))[0]
-    http_dump(ip, od, location)
+    http_dump(ip, od, location, delay=args.delay)
     if not args.no_control:
         print("# control-protocol queries (read-only)")
         control_probe(ip, args.control_port, od)

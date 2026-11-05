@@ -44,3 +44,20 @@ If the control port is refused, the unit of this generation may expose only the 
 interface; the http dump then shows the device/firmware details and the discovery output
 the model. The reverse-engineering itself does not depend on this — it is a cross-check
 and a way to observe live protocol behaviour.
+
+## Observed on the real unit (2026-11-05)
+
+Probed at the user's report that "the LAN is not connecting". The unit is at
+**192.168.1.13**, MAC **00:05:CD:13:81:94** (D&M Holdings / Denon — confirms the OUI).
+
+- It was reachable: ping 0% loss, ARP resolved, and open TCP ports **80, 5000, 6666,
+  8080**. Port 80 served a **GoAhead-Webs** HTML frameset titled `INDEX` (the DM850
+  config/control UI). 8080 answered HTTP (404 at root). 5000 and 6666 are raw services
+  (accept TCP, no banner, wait for a specific protocol). No SSDP/UPnP advert, no TFTP.
+- After a modest amount of probing the module went **fully unreachable** — no ICMP, no
+  TCP on any port. The DM850 hangs under load and takes the whole network stack down.
+
+So "LAN not connecting" is the **DM850 network module crashing/hanging**, not a wiring
+or DHCP problem — it gets an address and serves briefly, then drops off. A full AC
+power-cycle recovers it. Capture the web UI gently (one request at a time, `--delay`),
+once, right after a power-cycle; do not port-scan or crawl it fast.
