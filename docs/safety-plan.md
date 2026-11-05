@@ -80,7 +80,7 @@ After:
 | 0 | Version screen, MAC/IP, menu photos, SSManage `.bid` + FWCV parameter backup | none |
 | 1 | Offline: RE FWCV/updater (loader paths, read command, RS-232 path, DM850 recovery, VME stage); RE MAIN app↔loader interface (no-touch zone, block A runtime writes); bCoD checksum; byte-exact AVTOOL3 packer | none |
 | 2 | LAN hang diagnosis (firmware vs hardware); DM850 `start bootloader`/`start image`; DM850W 2006→2008; DM850I vendor round trip | DM850 only, vendor bytes |
-| 3 | MAIN blocks 0–2 dump via a minimal read-only patch (only if Stage 1 finds no loader read command). Gate A: loader recovers a broken app by itself | 1 MAIN |
+| 3 | MAIN blocks 0–2 dump. **Primary (2026-11-05): read-only `S` read through the vendor loader protocol** — the same session the vendor updater opens on every update (`RBUPDATE`, `C`, `S` parameter read), with the `S` range set to 0xFFC000–0xFFFFFF; no `L`, no write (loader-interface.md §2.4). Preconditions: Stage 1 items 3 (how to leave update mode) and "no erase/flag on entry" answered. Fallback only if the loader filters the range: minimal read-only MAIN patch. Gate A: loader recovers a broken app by itself | 0 MAIN (primary), 1 MAIN (fallback) |
 | 4 | DM850I reliability patch for the fault found in Stage 2 | DM850 |
 | 5 | MAIN patches after Gate A: DM850 supervisor (E_RESET/EPOWER), protocol hardening, further functions; bypass key + boot-attempt counter | MAIN, batched |
 

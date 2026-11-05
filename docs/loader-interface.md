@@ -92,12 +92,62 @@ handler must stay byte-identical in every patch, or the normal update route is l
 (code at 0x41F1CF–0x42016F). `tftp` client set-up at 0x4210B9 (UDP socket, bind to an
 ephemeral port, then sendto/recvfrom at 0x421147/0x421189).
 
-### 2.3 Serial path (code exists; target still open)
+### 2.3 Serial path (code exists; same protocol; target still open)
 
 Both tools populate COM1–COM8 and 9600–115200 bps lists and contain a real COM open
 (CreateFileA 0x41BCE0, SetCommTimeouts 0x41BD3E, SetCommState 0x41BDA5 in the updater).
-Open: whether this path reaches MAIN's loader through the rear RS-232 jack (UART1), and
-whether the UI exposes it outside a factory mode.
+The frame senders decompiled in §2.4 write through `WriteFile`/`ReadFile` +
+`ClearCommError` (a COM handle); the session-start sender uses the TCP object. So the
+serial path speaks the **same AA-framed loader protocol**. Open: whether MAIN's loader
+listens on UART1 (rear RS-232) and whether the UI exposes the COM path outside a
+factory mode.
+
+### 2.4 µcom loader protocol (port 5000 / COM) — decompiled with Ghidra 12.2
+
+Frames start `0xAA`, then a type letter, then the target ID (1 = MAIN, 2 = SUB,
+3 = DSP, 0x0A = DM850, 0x0B = CPLD). Multi-byte fields are **big-endian**. The checksum
+is the low byte of the sum of all preceding frame bytes (`FUN_0041AC80`).
+
+| Frame | Layout | Use (decompiled caller) |
+|---|---|---|
+| `C` | `AA 'C' tgt ck` (4 B) | connect / target information; reply type `C` (`FUN_0041D270`) |
+| `S` | `AA 'S' tgt sub start32 end32 ck` (13 B) | **read memory range start..end**; unit streams `D`/`P` frames (`FUN_0041A2C0`) |
+| `L` | `AA 'L' tgt sub w16 start32 end32 ck` (15 B) | begin load of an image range (erase/program); start/end are the AVTOOL3 header start/end columns (`FUN_0041A070`) |
+| `P` | data frame, payload ≤ 0x400 (≤ 0x100 for tgt 3/4/5/7) | image data to the unit, and read data from it |
+
+Reply frames (`FUN_0041ACA0`): `AA <type> tgt …`, type `A` ACK, `N` NACK, `C` info,
+`D` data, `E` error, `P` packet; `D`/`P` carry a 16-bit BE length at bytes 4–5; total
+= length + 11.
+
+Uses of `S` found:
+
+- **Verify** (`FUN_00419560`, called from `FUN_004076A0`): `S(tgt, 0, image start,
+  image end)`, then the received bytes are compared byte-for-byte with the image file.
+  Verify is a **read-back**, not a checksum.
+- **Parameter backup** (`FUN_004192D0` via `FUN_00407A60`): `S(1, 0, 0x040C, 0x2701)` —
+  MAIN **RAM** 0x040C–0x2701 — saved as `parameter.bin`. Restore (`FUN_00407B90` →
+  `FUN_004191D0`) writes 0x22F6 bytes back to the same RAM range. Cross-check: the
+  SSManage file `original_AVR-4306.bid` is 8,960 B = 10-byte header `4306EU0099` +
+  0x22F6 B — the same parameter block.
+
+**Consequence:** the loader serves reads of caller-chosen ranges, including non-flash
+(RAM) addresses. `S(1, 0, 0xFFC000, 0xFFFFFF)` in update mode should return blocks 0–2
+with **no write** — unless Denon's loader filters that range. This would replace the
+custom dump patch (safety-plan Stage 3), the riskiest planned step.
+
+### 2.5 Update sequence (master loop `FUN_00406C50`, up to 20 images)
+
+Per enabled image: version check `FUN_00407190` (skip with "Pass update." when the
+package version string equals the version reported for that target) → target switch
+`FUN_00407350` if the processor changes → parameter backup (MAIN) → load image into a
+4 MB 0xFF-filled buffer and re-check its byte sum (`FUN_00409AE0`) → write: target 0x0B
+goes to the CPLD/VME player only for images named `CPLD`/`CPLDA`/`CPLDL`; all others
+`FUN_00419260` = `L` then data → post-step by per-image mode (verify read-back etc.) →
+parameter restore.
+
+**VME/CPLD stage (answered):** reached only through an image whose name is CPLD, CPLDA or
+CPLDL. No vendor package contains one and avtool3_pack.py can only emit vendor image
+names, so it cannot run for our builds.
 
 ## 3. bCoD and AVTOOL3 (solved — see tools)
 
@@ -109,16 +159,22 @@ whether the UI exposes it outside a factory mode.
 
 ## 4. Open (Stage 1 exit gate)
 
-1. P/L/S/C/D frame format on port 5000; is there a read/verify command that returns
-   flash contents (would dump blocks 0–2 with no write)?
-2. Same-version skip: where it reads the version (identity string vs header).
-3. Does the loader honour partial address ranges, or erase blocks 3–20 wholesale?
-4. Serial path target (§2.3).
-5. "Recovering DM800" (0x40661D): how a dead DM850 is reached (expected: MAIN drives
-   E_MODE/E_RESET; DM850B runs the TFTP client).
-6. VME/CPLD stage: where it is triggered, how to guarantee it is skipped.
-7. What the application's update path does after `RBUPDATE` up to `jmp 0xFFC09F`, and
-   whether the loader can be entered when the application is broken (needs blocks 0–2).
+Answered: frame format (§2.4), read command exists (`S`, §2.4), VME stage cannot run
+(§2.5), ranges are sent explicitly from the header (§2.4 `L`).
 
-Tooling note: full decompilation would speed items 1–6 (Ghidra 12.2 needs JDK 25 and a
-locally built macOS decompiler); targeted disassembly with pe_xref.py works meanwhile.
+1. Same-version skip: the version check compares strings, but the decompile does not show
+   which unit-side string it uses (identity string at 0xFFBE80 is the candidate). Needed
+   so patched builds are not skipped.
+2. Does Denon's loader erase only the `L` range, or all of blocks 3–20? Does it filter
+   `S` ranges? (Answerable only from blocks 0–2 — or by a read-only `S` probe.)
+3. The command that returns the unit from update mode to application mode, and what
+   entering update mode changes (any erase or persistent flag on entry?). Needed before
+   a read-only `S` session is run on the unit.
+4. Serial path target (§2.3).
+5. "Recovering DM800" (0x40661D): how a dead DM850 is reached.
+6. RB in MAIN: id 0x1C → internal 0x28 is not handled by the 0xF4B206 group switch
+   (default exit at 0xF4B2DC); the handling group (0xF45F48 / 0xF461A2 / 0xF4B24D) is
+   still to trace. Then the path from `RBUPDATE` to `jmp 0xFFC09F`.
+
+Tooling: Ghidra 12.2 headless with a locally built macOS arm64 decompiler
+([tools/ghidra/](../tools/ghidra/)); pe_xref.py for quick string/import lookups.
