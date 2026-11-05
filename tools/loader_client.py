@@ -2,8 +2,10 @@
 """Read-only client for the AVR-4306 MAIN loader protocol.
 
 Protocol decompiled from the 6.0.0.4 updater (docs/loader-interface.md §2.4–2.6):
-telnet TCP 23 carries control-protocol commands (`VI?`, `RBUPDATE`); TCP 5000 carries raw
-AA-framed loader frames, bridged by the DM850 to MAIN.
+TCP 5000 carries both control-protocol lines (`VI?`, `RBUPDATE`) and raw AA-framed loader
+frames, bridged by the DM850 to MAIN; telnet TCP 23 also answers `VI?`. The vendor update
+order (FUN_00407C60) is: 5000 `VI?` -> 5000 `RBUPDATE`/`RBSTART` -> wait 15 s -> 5000 `C`.
+TCP 5001 is the DM850 bootloader channel; this tool refuses it.
 
   frame   = AA <type> <target> ... <ck>        ck = low byte of the sum of all prior bytes
   C       = AA 'C' tgt ck                       connect / target info (reply type 'C')
@@ -20,19 +22,25 @@ unit has answered RBUPDATE with RBSTART. Every connection is opened one at a tim
 delay, because the DM850 hangs under fast connection churn (docs/lan-access.md).
 
 Commands:
-  loader_client.py version --ip IP               telnet 'VI?' (normal mode, read-only)
-  loader_client.py check   --ip IP               port 5000 'C' frame (vendor "Check
-                                                 communication"), normal mode
+  loader_client.py version --ip IP               'VI?' on the control port (default 5000;
+                                                 23 also works), normal mode, read-only
+  loader_client.py check   --ip IP               'C' frame on port 5000. Answered only in
+                                                 update mode: the vendor sends it only when
+                                                 'VI?' fails. No reply in normal mode is
+                                                 expected (seen on the unit 2026-11-05).
   loader_client.py read    --ip IP --start A --end B --confirm-update-mode
-        RBUPDATE -> RBSTART, then C and S(A, B) on port 5000; saves the bytes to dumps/
-        with a sha256. Afterwards the unit must be power-cycled (vendor procedure).
+        VI?, RBUPDATE -> RBSTART, wait 15 s, then C and S(A, B) on port 5000; saves the
+        bytes to dumps/ with a sha256. Afterwards the unit must be power-cycled (vendor
+        procedure).
 
-Run with python3 -I. --telnet-port / --loader-port exist for the local test peer
+Run with python3 -I. --control-port / --loader-port exist for the local test peer
 (sim/fake_unit.py).
 """
 import argparse, datetime, hashlib, os, socket, sys, time
 
 ALLOWED_TYPES = {b'C', b'S', b'A', b'N'}     # frames this tool may ever send
+REFUSED_PORTS = {5001}                       # DM850 bootloader commands (FUN_004090A0)
+UPDATE_SETTLE = 15.0                         # vendor wait after RBSTART (0x408137)
 MAX_READ = 0x400000
 DATA_TYPES = (ord('D'), ord('P'))
 
@@ -56,6 +64,8 @@ class Link:
     """One TCP connection with a receive buffer and a transcript."""
 
     def __init__(self, ip, port, log, timeout=6.0):
+        if port in REFUSED_PORTS:
+            raise ValueError(f'refused: port {port} is the DM850 bootloader channel')
         self.log = log
         self.s = socket.create_connection((ip, port), timeout=timeout)
         self.s.settimeout(timeout)
@@ -128,7 +138,7 @@ def desc(f):
 
 
 def cmd_version(a, log):
-    t = Link(a.ip, a.telnet_port, log)
+    t = Link(a.ip, a.control_port, log)
     try:
         t.send(b'VI?\r')
         ok, got = t.wait_text(b'VI', 3.0)
@@ -138,11 +148,15 @@ def cmd_version(a, log):
         t.close()
 
 
-def connect_check(link, tgt, log):
-    link.send(frame(b'C', tgt))
-    f = link.read_frame(6.0)
-    log(f'< C reply: {desc(f)}' + (f' {f.hex(" ")}' if f else ''))
-    return f is not None and f[1] == ord('C') and ck(f[:-1]) == f[-1]
+def connect_check(link, tgt, log, tries=1):
+    # Vendor FUN_0041D270: send C, wait up to 6 s for the reply, up to 3 retries.
+    for _ in range(tries):
+        link.send(frame(b'C', tgt))
+        f = link.read_frame(6.0)
+        log(f'< C reply: {desc(f)}' + (f' {f.hex(" ")}' if f else ''))
+        if f is not None and f[1] == ord('C') and ck(f[:-1]) == f[-1]:
+            return True
+    return False
 
 
 def cmd_check(a, log):
@@ -198,16 +212,20 @@ def cmd_read(a, log):
                  '(UPS, direct cable, nothing else on the LAN), then add --confirm-update-mode.')
     if a.end < a.start or a.end - a.start + 1 > MAX_READ:
         sys.exit('refused: range must be 1 byte .. 4 MB')
-    # 1. Vendor "Check communication": port 5000, C frame, normal mode.
-    l = Link(a.ip, a.loader_port, log)
+    # Same order as the vendor update (FUN_00407C60), all on the control port.
+    # 1. Version request, normal mode (FUN_00407EA0).
+    t = Link(a.ip, a.control_port, log)
     try:
-        if not connect_check(l, a.target, log):
-            sys.exit('C frame not answered in normal mode; nothing changed on the unit.')
+        t.send(b'VI?\r')
+        ok, got = t.wait_text(b'VI', 3.0)
     finally:
-        l.close()
+        t.close()
+    if not ok:
+        sys.exit('VI? not answered in normal mode; nothing changed on the unit.')
+    print('VI reply:', got.decode('latin1', 'replace').strip())
     time.sleep(a.delay)
-    # 2. Enter update mode exactly as the vendor tool does: RBUPDATE over telnet, wait RBSTART.
-    t = Link(a.ip, a.telnet_port, log)
+    # 2. Enter update mode (FUN_00408050): RBUPDATE, wait RBSTART, up to 3 tries.
+    t = Link(a.ip, a.control_port, log)
     try:
         for attempt in range(3):
             t.send(b'RBUPDATE\r')
@@ -219,12 +237,13 @@ def cmd_read(a, log):
                      'sure it is back in normal mode.')
     finally:
         t.close()
-    print('unit confirmed update mode (RBSTART)')
-    time.sleep(a.delay)
-    # 3. Loader: C, then the read.
+    print(f'unit confirmed update mode (RBSTART); waiting {UPDATE_SETTLE:.0f} s as the '
+          'vendor tool does')
+    time.sleep(UPDATE_SETTLE)
+    # 3. Loader (FUN_00408170): C with 3 tries, then the read.
     l = Link(a.ip, a.loader_port, log)
     try:
-        if not connect_check(l, a.target, log):
+        if not connect_check(l, a.target, log, tries=3):
             print('loader did not answer C after RBSTART')
             data = None
         else:
@@ -247,7 +266,8 @@ def main():
     ap = argparse.ArgumentParser(description='read-only AVR-4306 loader-protocol client')
     ap.add_argument('cmd', choices=['version', 'check', 'read'])
     ap.add_argument('--ip', required=True)
-    ap.add_argument('--telnet-port', type=int, default=23)
+    ap.add_argument('--control-port', type=int, default=5000,
+                    help='port for VI?/RBUPDATE (vendor update uses 5000; 23 also answers VI?)')
     ap.add_argument('--loader-port', type=int, default=5000)
     ap.add_argument('--target', type=lambda x: int(x, 0), default=1, help='1 = MAIN')
     ap.add_argument('--start', type=lambda x: int(x, 0), default=0xFFC000)

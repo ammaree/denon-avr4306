@@ -162,7 +162,7 @@ controller off whenever tools talk to the unit; it also fits rule 7 of safety-pl
 The unit runs the latest vendor firmware (6.0.0.4). The DM850 fields are 13-char stamps
 padded with NULs to 20; the reply carries no DM850W/DM850D stamp.
 
-Port 5000 still gives no `C` reply with telnet working, so cause 4 stands: the decompiled
-updater (0x405D90) sends `RBUPDATE` *before* its first `C` on 5000 (`FUN_0041D270`, frame
-bytes identical to ours), and the normal-mode `C` answer assumed in loader-interface.md
-§2.6 step 1 is not seen on the live unit. See loader-interface.md §4 item 5.
+Port 5000 still gives no `C` reply with telnet working. This is expected: the vendor
+tool sends `C` only after `RBUPDATE`, or as a fallback when `VI?` fails
+(loader-interface.md §2.1, settled offline the same evening). A normal-mode unit is
+checked with `VI?`.

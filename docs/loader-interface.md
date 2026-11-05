@@ -12,6 +12,8 @@ Status 2026-11-05: in progress. Confidence is stated per item.
   encodings in the whole image. The resident loader sets them, then jumps to the
   **entry pointer at 0xFFBE7C** (0xF0070C in 00.99/01.00; 0xF006F4 in 00.76).
 - The entry begins `fclr i` (interrupts off) and calls the init routines.
+- Correction (§1.4b): the code at this entry is MAIN's update agent, not the AV
+  application. How the loader starts the application is in blocks 0–2.
 
 ### 1.2 Application header block 0xFFBE7C–0xFFBFFF (confirmed layout, meaning inferred)
 
@@ -80,6 +82,30 @@ results). All five `jmp.a 0xFFC09F` sites were decompiled:
 
 What Denon's loader does with each mode value is in blocks 0–2 and still unknown.
 
+### 1.4b The code at the entry pointer is an update agent, not the AV application (decompiled 2026-11-05)
+
+`0xF0070C` (entry pointer at 0xFFBE7C) runs: `0xF007B0` (INTB = 0xFFBD7C), `0xF007B6`
+(UART0/1/3 at BRG 0x0F, timers A0/A1), then an endless state machine on RAM 0x2D66. It
+never calls the AV application. The 0xFFBF00 table, by contrast, points into the
+application (vector 20, UART1 RX → 0xF4BA26, next to the control-protocol dispatcher
+0xF4B42E). Reading: Denon's loader enters the application through its own path
+(unknown, in blocks 0–2) and enters this agent through 0xFFBE7C. §1.1 therefore
+describes the agent's start-up, not the application's.
+
+Agent frame handling (`0xF01038`, parser `0xF013A2` with frame length per type):
+
+| Mode word 0x0400 | Frames acted on | Effect |
+|---|---|---|
+| ≠ 0x0C | `U` | `0xF00A96`: ACK, then UART baud from byte 3 (1→0x60, 2→0x30, 3→0x20, 4→0x0F) |
+| ≠ 0x0C | `X` | `0xF008E4`: byte 3 selects mode 4–0x0E, ACK/NACK, flash reset, `jmp 0xFFC09F` |
+| ≠ 0x0C | `RBNORM\r` (parsed when the AA checksum fails) | `0xF00FA0`: sends `RBSTART\r`, mode 0, flash reset, `jmp 0xFFC09F` |
+| ≠ 0x0C | anything else | frame flagged (0x3190 bit 4), not answered |
+| 0x0C (DM850 relay) | `U`, `X`, `C`, `L`, `P`, `I` | `C` → reply `AA 'C' 0A ck`; `L`/`P` feed the DM850 write path; `I` → 0x36-byte info frame with `OK`/`NG` |
+
+`RBNORM` is therefore a software exit from the agent; the vendor manual still says
+power-cycle, and this tool keeps that rule. The agent writes no flash itself; every
+path that leaves it resets the flash controller and jumps into the loader.
+
 ### 1.5 Free space for patches (confirmed)
 
 One contiguous erased run **0xFA969A–0xFFBD7B (337,634 bytes)**. Everything from
@@ -90,17 +116,34 @@ One contiguous erased run **0xFA969A–0xFFBD7B (337,634 bytes)**. Everything fr
 Analysis with [tools/pe_xref.py](../tools/pe_xref.py) (string/import cross-references
 over the system objdump).
 
-### 2.1 Entry into update mode (confirmed)
+### 2.1 Ports and the two vendor sequences (decompiled, corrected 2026-11-05)
 
-Connection state machine at 0x405D90:
+An earlier reading of 0x405D90 was wrong: that code is "Check communication", and
+`FUN_0041E8E0` wraps `VI?` (`FUN_0041EA60`), not `RBUPDATE` (`FUN_0041E8B0` →
+`FUN_0041E910`). Connect calls (`FUN_0041C8E0(ip, port)`) by site:
 
-1. TCP connect to the unit, **port 23** (DM850 telnet → control protocol).
-2. Send **`RBUPDATE\r`**, expect **`RBSTART`** (function 0x41E8E0); close.
-3. TCP connect, **port 5000** (update transfer channel; the port answers on the live
-   unit with no banner).
-4. First exchange on 5000: 0x41D270(1, 3).
+| Port | Sites | Use |
+|---|---|---|
+| 23 | 0x405DE7 | "Check communication" first try: `VI?` |
+| 5000 | 0x405E42, 0x407F55, 0x4080CC, 0x408CC2 | control lines (`VI?`, `RBUPDATE`) **and** AA loader frames on the same port |
+| 5001 | 0x40615F, 0x40664E, 0x4092BD, 0x409339 | DM850 bootloader channel ("Checking DM800", "Recovering DM800", per-image DM850 loop `FUN_004090A0`) |
 
-FWCV additionally has **`RBNORM\r`** (back to normal mode).
+**Check communication** (`FUN_00405CB0`): port 23, `VI?` → OK. Only if `VI?` fails:
+port 5000, `C(1)` with a 3 s timeout → OK. So `C` is the fallback for a unit that is
+already in update mode, not a normal-mode check.
+
+**Update** (`FUN_00407C60`, "Updating start..."), all on port 5000:
+
+1. `FUN_00407EA0`: connect, `VI?`, parse the versions (`FUN_0041ED80`), close.
+2. `FUN_00408050`: connect, `RBUPDATE\r`, wait `RBSTART` (3 tries), log "Reboot(Update
+   Mode)...", **wait 15 s** (`FUN_00409ED0(0x0F)`, 1 s ticks), close.
+3. `FUN_00408170`: connect, `C(1)` with a 6 s timeout and 3 retries (`FUN_0041D270`).
+4. `FUN_004081C0`: target information (`FUN_0041D3F0(1, …)`); then the per-image steps.
+
+MAIN's route is `01` (firmware-package.md §5), so the target switch `FUN_00407350`
+makes no hop and sends no `X` frame before MAIN is read or written.
+
+FWCV additionally has **`RBNORM\r`**. MAIN's update agent (§1.4b) accepts it.
 
 `RB` is a control-protocol token in MAIN (Phase 1 token table: RB → id 0x1C → internal
 0x28). **Update mode is entered by a command that the running MAIN application parses
@@ -177,11 +220,13 @@ names, so it cannot run for our builds.
 From the updater state machine (0x405CB0), `FUN_0041E910`, `FUN_0041EA60` and the vendor
 manual (Upgrade Manual 2008-09-12, §3.7–3.9):
 
-1. **Check communication** (normal mode): TCP 5000, `C` frame → `C` reply. The running
-   application answers AA frames arriving from the DM850 link (0xF01A12).
-2. **Request Version**: telnet `VI?\r`, reply starts `VI`. `VI` is a control-protocol
+1. **Check communication**: `VI?` on port 23; `C` on 5000 only if that fails (§2.1).
+   In normal mode `C` on 5000 gets no answer (live unit 2026-11-05).
+2. **Request Version**: `VI?\r` on 5000, reply starts `VI`. `VI` is a control-protocol
    token (id 0x1B). This reply is the unit-side version used by the same-version skip.
-3. **Reboot(Update Mode)**: telnet `RBUPDATE\r`, expect `RBSTART`, up to 3 tries.
+   Live reply: `VI01:0100;02:0050;03:0004;0A:B200510231011…,I200805270745…;`.
+3. **Reboot(Update Mode)**: `RBUPDATE\r` on 5000, expect `RBSTART`, up to 3 tries, then
+   15 s wait.
 4. Per image: `[01:MAIN] Updating start` → parameter backup (`S` of RAM) → **Erasing**
    (during `L`) → data → verify read-back → parameter restore.
 5. **Exit:** the manual tells the user to switch the unit off after "Update completed",
@@ -200,14 +245,16 @@ vendor image of the same version can be re-flashed (simplifies safety-plan Stage
 
 ### 2.7 Read-only client
 
-[tools/loader_client.py](../tools/loader_client.py) implements only steps 1–3 plus a
-single `S` read: `version` (`VI?`), `check` (`C`), `read` (`C` → `RBUPDATE`/`RBSTART` →
-`C` → `S(start,end)` → ACK per frame). Its frame builder refuses anything but C, S, A,
-N; `read` needs `--confirm-update-mode`; connections are paced. Tested against
-[sim/fake_unit.py](../sim/fake_unit.py) (a local peer implementing §2.4–2.6): blocks
-0–2 pattern and a 128 KB application range read back byte-exact, also with every 5th
-data frame corrupted (NACK/retry). The fake encodes this document's reading of the
-protocol; it does not prove the real loader behaves the same.
+[tools/loader_client.py](../tools/loader_client.py) implements only update steps 1–3
+plus a single `S` read, in the vendor order of §2.1: `version` (`VI?`), `check` (`C`;
+answered in update mode only), `read` (`VI?` → `RBUPDATE`/`RBSTART` → 15 s → `C` ×3 →
+`S(start,end)` → ACK per frame), all on port 5000 by default. Its frame builder refuses
+anything but C, S, A, N; it refuses port 5001; `read` needs `--confirm-update-mode`;
+connections are paced. Tested against [sim/fake_unit.py](../sim/fake_unit.py) (a local
+peer implementing §2.1–2.6, `C` silent in normal mode): normal-mode `check` NG, blocks
+0–2 pattern read byte-exact, 32 KB application range byte-exact with every 5th data
+frame corrupted (NACK/retry). The fake encodes this document's reading of the protocol;
+it does not prove the real loader behaves the same.
 
 ## 3. bCoD and AVTOOL3 (solved — see tools)
 
@@ -234,14 +281,14 @@ flash when handing over (§1.4a); the unit-side version for the skip comes from 
 3. "Recovering DM800" (0x40661D → `FUN_004090A0`): how a dead DM850 is reached.
 4. Which control-protocol handler turns ASCII `RBUPDATE` into set_mode + jump (RB is not
    in the 0xF4B206 group; the five set_mode callers are listed in §1.4a).
-5. **§2.6 step 1 conflicts with the live unit.** On 2026-11-05 (after an AC power-cycle,
-   telnet answering `VI?`) TCP 5000 accepted the connection but `aa 43 01 ee` got no
-   reply in 6 s. The frame matches `FUN_0041D270` byte for byte, and §2.1 has the
-   updater send `RBUPDATE` first. Working reading: in normal mode the DM850 does not
-   bridge 5000 to MAIN (or MAIN ignores `C`); `C` is answered only in update mode.
-   Consequence: `loader_client.py read` aborts at its normal-mode `C` step and must be
-   changed to the §2.1 order before Stage 3. Settle from the updater's "Check
-   communication" handler and the DM850I socket code before any update-mode session.
+5. ~~Normal-mode `C` on 5000 unanswered on the live unit.~~ **Answered:** expected. The
+   vendor sends `C` only after `RBUPDATE` (update) or after `VI?` has failed (check);
+   §2.1. `loader_client.py read` now follows the vendor order.
+6. Who answers `C(1)` / `S(1, …)` in update mode: the update agent (§1.4b) ignores frames
+   for target 1 except `U`/`X`, so it is probably the loader in blocks 0–2. Settled by
+   the first `read`.
+7. Whether the DM850 passes `VI?` on 5000 to MAIN in normal mode (vendor relies on it;
+   not yet tried on the unit; a read-only check).
 
 Tooling: Ghidra 12.2 headless with a locally built macOS arm64 decompiler
 ([tools/ghidra/](../tools/ghidra/)); pe_xref.py for quick string/import lookups.

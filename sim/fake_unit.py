@@ -4,8 +4,11 @@
 Implements the protocol as decompiled from the 6.0.0.4 updater (docs/loader-interface.md
 §2.4–2.6), nothing more:
   telnet port : 'VI?\\r' -> 'VIxxxx\\r';  'RBUPDATE\\r' -> 'RBSTART\\r' and update mode
-  loader port : C -> C reply; S(start,end) -> ACK, then data frames of <= 0x400 bytes, each
-                acknowledged by the PC; S is NACKed unless in update mode
+  loader port : the same two text commands (the vendor update sends them on 5000), and
+                AA frames: C -> C reply in update mode only (silent in normal mode, as the
+                real unit on 2026-11-05); S(start,end) -> ACK, then data frames of
+                <= 0x400 bytes, each acknowledged by the PC; S is NACKed unless in update
+                mode
 Memory: --image at 0xF00000 (e.g. build/images/MAIN_01.00.flash.bin); 0xFFC000-0xFFFFFF
 filled with a known pattern (low byte of addr*7+3) standing in for the resident blocks.
 --corrupt N sends every Nth data frame with a bad checksum (tests NACK/retry).
@@ -30,6 +33,16 @@ def mem_read(img, addr):
     return 0
 
 
+def control_line(c, line):
+    if line == b'VI?':
+        c.sendall(b'VI01:0100;02:0050;03:0004;\r')
+    elif line == b'RBUPDATE':
+        STATE['update'] = True
+        c.sendall(b'RBSTART\r')
+    else:
+        print('control: unexpected', line)
+
+
 def serve_telnet(sock):
     while True:
         c, _ = sock.accept()
@@ -42,13 +55,7 @@ def serve_telnet(sock):
                 buf += d
                 while b'\r' in buf:
                     line, buf = buf.split(b'\r', 1)
-                    if line == b'VI?':
-                        c.sendall(b'VI0100\r')
-                    elif line == b'RBUPDATE':
-                        STATE['update'] = True
-                        c.sendall(b'RBSTART\r')
-                    else:
-                        print('telnet: unexpected', line)
+                    control_line(c, line)
 
 
 def recv_exact(c, n):
@@ -68,14 +75,20 @@ def serve_loader(sock, img, corrupt):
         with c:
             try:
                 while True:
-                    h = recv_exact(c, 3)
-                    if h[0] != 0xAA:
+                    b0 = recv_exact(c, 1)
+                    if b0 != b'\xAA':
+                        line = b0
+                        while not line.endswith(b'\r'):
+                            line += recv_exact(c, 1)
+                        control_line(c, line[:-1])
                         continue
+                    h = b0 + recv_exact(c, 2)
                     t, tgt = h[1], h[2]
                     if t == ord('C'):
                         f = h + recv_exact(c, 1)
-                        rep = b'\xAA' + b'C' + bytes([tgt])
-                        c.sendall(rep + bytes([ck(rep)]))
+                        if STATE['update']:
+                            rep = b'\xAA' + b'C' + bytes([tgt])
+                            c.sendall(rep + bytes([ck(rep)]))
                     elif t == ord('S'):
                         f = h + recv_exact(c, 10)
                         if ck(f[:-1]) != f[-1] or not STATE['update']:
