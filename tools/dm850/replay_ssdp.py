@@ -12,11 +12,13 @@ actually runs; the length the responder would pass to memcpy is what is measured
   build/venv/bin/python tools/dm850/replay_ssdp.py
 
 Conclusions, printed and asserted:
-- vendor + urn:Belkin:service:basicevent  -> reply reached, copy length >> frame
-- vendor + urn:...:service:dial:1          -> reply reached, length 4
-- vendor + urn:...:service:ContentDirectory:1 -> length 16
-- patched + Belkin                         -> reply NOT reached, type switch returns 0
-- patched + dial / ContentDirectory        -> length 4 / 16 (still answered)
+- vendor + urn:Belkin:service:basicevent      -> reply reached, copy length >> frame
+- vendor + urn:...:service:dial:1              -> reply reached, length 4
+- vendor + urn:...:service:ContentDirectory:1  -> length 16
+- vendor + urn:...:device:MediaServer (no :N)  -> reply reached, copy length >> frame
+- vendor + urn:...:device:MediaServer:1        -> length 11
+- patched + Belkin / device-no-colon          -> reply NOT reached, type switch returns 0
+- patched + dial / ContentDirectory / device:1 -> still answered (4 / 16 / 11)
 """
 import os
 import sys
@@ -157,7 +159,10 @@ STS = {
     'dial': 'dial-multiscreen-org:service:dial:1',
     'ContentDirectory': 'schemas-upnp-org:service:ContentDirectory:1',
 }
-DEV_ST = 'schemas-upnp-org:device:MediaServer'   # device arm, no trailing colon
+DEV_STS = {
+    'device_bad': 'schemas-upnp-org:device:MediaServer',      # no version colon
+    'device_ok': 'schemas-upnp-org:device:MediaServer:1',     # valid device URN
+}
 
 
 def describe(r):
@@ -179,10 +184,11 @@ def main():
             results[tag][name] = r
             print(f"  service urn:{tail}")
             print(f"    -> {describe(r)}")
-        rd = rep.run(DEV_ST, TYPE_DEVICE)
-        results[tag]['device'] = rd
-        print(f"  device  urn:{DEV_ST}")
-        print(f"    -> {describe(rd)}")
+        for name, tail in DEV_STS.items():
+            r = rep.run(tail, TYPE_DEVICE)
+            results[tag][name] = r
+            print(f"  device  urn:{tail}")
+            print(f"    -> {describe(r)}")
         print()
 
     v, p = results['vendor'], results['patched']
@@ -195,16 +201,20 @@ def main():
     # Patched: the two real searches still get a reply, same lengths as vendor.
     assert p['dial']['reply'] and p['dial']['len'] == 4, p['dial']
     assert p['ContentDirectory']['reply'] and p['ContentDirectory']['len'] == 16, p['ContentDirectory']
-    # Device arm (docs/dm850-audit.md §2) is NOT patched here: it still overruns
-    # on both images. Recorded so the gate states what the service patch leaves.
-    assert v['device']['reply'] and v['device']['len'] > FRAME_DEV, v['device']
-    assert p['device']['reply'] and p['device']['len'] > FRAME_DEV, p['device']
+    # Device arm (docs/dm850-audit.md §2), now guarded by the same cave:
+    # vendor overruns on a device URN with no version colon; patched drops it and
+    # returns 0, while a valid device URN (…:1) still gets a reply on both images.
+    assert v['device_bad']['reply'] and v['device_bad']['len'] > FRAME_DEV, v['device_bad']
+    assert (not p['device_bad']['reply']) and p['device_bad']['ret'] == 0 and p['device_bad']['clean'], p['device_bad']
+    assert v['device_ok']['reply'] and v['device_ok']['len'] == 11, v['device_ok']
+    assert p['device_ok']['reply'] and p['device_ok']['len'] == 11, p['device_ok']
 
     print("GATE PASS")
     print(f"  vendor  Belkin copy length {v['Belkin']['len']} > frame {FRAME_SVC}: would smash the stack")
     print(f"  patched Belkin: service URN with no version colon is ignored, type switch returns 0")
     print(f"  patched dial/ContentDirectory still answered (lengths 4 / 16)")
-    print(f"  device arm still overruns on both images (length {p['device']['len']}): §2 patch not applied")
+    print(f"  vendor  device URN with no colon overruns (length {v['device_bad']['len']} > frame {FRAME_DEV})")
+    print(f"  patched device URN with no colon ignored; valid device URN still answered (length 11)")
 
 
 if __name__ == '__main__':

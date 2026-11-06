@@ -82,21 +82,23 @@ def main():
     assert r7 == 0x100 << 16, hex(r7)
 
     image = os.path.join(ROOT, 'build', 'patch', 'DM850I_ssdp.flash.bin')
-    if not os.path.exists(image):
-        subprocess.check_call([sys.executable, os.path.join(HERE, 'apply_ssdp_guard.py')])
+    # Always rebuild so the test reflects the current apply script.
+    subprocess.check_call([sys.executable, os.path.join(HERE, 'apply_ssdp_guard.py')])
     data = open(image, 'rb').read()
-    bl = ap.enc_bl(ap.SITE, ap.CAVE)
-    so, co = ap.file_off(ap.SITE), ap.file_off(ap.CAVE)
-    assert data[so:so + 4] == bl, data[so:so + 4].hex()
+    co = ap.file_off(ap.CAVE)
     assert data[co:co + len(code)] == code
+    vendor = open(ap.IMAGE, 'rb').read()
+    for name, site in ap.SITES.items():
+        so = ap.file_off(site)
+        bl = ap.enc_bl(site, ap.CAVE)
+        assert data[so:so + 4] == bl, f'{name}: {data[so:so+4].hex()}'
+        # The vendor image still has the original instruction at each site.
+        assert vendor[so:so + 4] == ap.SITE_BYTES, name
     sys.path.insert(0, os.path.join(ROOT, 'tools'))
     import bcod_sum
     probs = bcod_sum.check(data)
     assert not probs, probs
-    # The vendor image still has the original instruction.
-    vendor = open(ap.IMAGE, 'rb').read()
-    assert vendor[so:so + 4] == ap.SITE_BYTES
-    print(f'guard ok, cave {len(code)} bytes, image CRCs match')
+    print(f'guard ok, cave {len(code)} bytes, both sites BL to cave, image CRCs match')
 
 
 if __name__ == '__main__':

@@ -58,7 +58,8 @@ Type 5 of the same switch (`0x60049AB4`) does the same pair of `strstr` calls fo
 `subs r0, r0, r6` is at `0x60049AD0`, again with no test of r0.
 `urn_device_reply` (`0x60070974`) does `sub sp, #0x5C` and `memcpy`s that length at
 `0x60070998`. A device ST with no colon after the name takes this path. The Belkin
-ST matches `:service:`, so it does not.
+ST matches `:service:`, so it does not. This site is patched in §4 by the same cave
+as the service arm.
 
 ## 3. Suspected: NicheStack before 4.3
 
@@ -76,38 +77,45 @@ separated out of them.
 | ICMP | The string `ICMP` at `0x601B1F23` has one word reference and no Thumb literal. | An ICMP datagram, receive function not located. |
 | Allocator | `pk_alloc` (`0x60124BA4`) refuses a size above `bigbufsiz` (`0x708` at `0x601E4FD4`) and refuses a call when the word at `0x00540010` is set. | Not a missing check. Recorded so it is not re-read as one. |
 
-## 4. Patch: ignore a service name with no colon
+## 4. Patch: ignore a URN name with no colon (service and device arms)
 
 Do not flash this. The DM850 has no recovery path if a write fails, and the vendor
 update rewrites the web pages with the code (`docs/loader-interface.md`).
 
-Located change, Thumb, in the service arm:
+Located changes, Thumb. The two arms hold identical bytes and both branch to one
+cave:
+
+| | Service arm | Device arm |
+|---|---|---|
+| Site | `0x60049B36`, file offset `0x57D22` | `0x60049AD0`, file offset `0x57CBC` |
+| Was | `subs r0, r0, r6` / `lsls r7, r0, #16` (`80 1b 07 04`) | same (`80 1b 07 04`) |
+| Now | `bl 0x601CE800` (`84 f1 63 fe`) | `bl 0x601CE800` (`84 f1 96 fe`) |
+| Return (r0≠0) | `0x60049B3A` | `0x60049AD4` |
 
 | | |
 |---|---|
-| Site | `0x60049B36`, file offset `0x57D22` |
-| Was | `subs r0, r0, r6` / `lsls r7, r0, #16` (`80 1b 07 04`) |
-| Now | `bl 0x601CE800` |
-| Cave | `0x601CE800`, file offset `0x1DC9EC` |
+| Cave | `0x601CE800`, file offset `0x1DC9EC` (20 bytes) |
 
 The cave is inside the zero run `0x601CE424`–`0x601CF090`. No pointer in the SDRAM
 image lands in that run. `tools/dm850/ssdp_guard.S` is the source. The apply script
 assembles it with `arm-none-eabi-gcc -mthumb -march=armv5t` when that compiler is on
-`PATH`, and otherwise with `clang -target arm-none-eabi`. It checks the site bytes
-and the zero run, writes `build/patch/DM850I_ssdp.flash.bin`, and recomputes the
-three bCoD CRCs with `tools/bcod_sum.py`.
+`PATH`, and otherwise with `clang -target arm-none-eabi`. It checks both site byte
+patterns and the zero run, writes `build/patch/DM850I_ssdp.flash.bin`, and recomputes
+the three bCoD CRCs with `tools/bcod_sum.py`. The patched image differs from the
+vendor image in 35 bytes: the two 4-byte BLs, the 20-byte cave (one byte shared with
+the zero run), and the two bCoD CRC words.
 
 On r0 == 0 the cave branches to `0x60049B76` (`movs r0, #0`, then the epilogue).
 `disc_srv_schedule` (`0x600496D6`) returns immediately when that result is 0, so
-`urn_service_reply` is not called. `dial:1` and `ContentDirectory:1` still take the
-original subtract and shift, and still get a reply. The device arm in §2 is not
-patched.
+neither reply builder is called. On r0 ≠ 0 the cave does the original subtract and
+shift and `bx lr` back to whichever site called it, so `dial:1`,
+`ContentDirectory:1` and a valid `urn:…:device:…:1` still get a reply.
 
 Offline gate, before any flash: `python3 -I tools/dm850/test_ssdp_guard.py` executes
 the assembled cave. A zero search result must branch to `0x60049B77`. A non-zero
-result must leave `r0 = r0 - r6` and `r7 = r0 << 16` and return to `0x60049B3A`.
-The same run checks the patched image's site, cave bytes and CRCs, and that the
-vendor image is unchanged.
+result must leave `r0 = r0 - r6` and `r7 = r0 << 16` and return through `bx lr`. The
+same run rebuilds the patched image and checks both BLs, the cave bytes and the CRCs,
+and that the vendor image is unchanged at both sites.
 
 ### Replay gate (built, passing)
 
@@ -131,20 +139,19 @@ Measured, and asserted by the script:
 | vendor | `urn:Belkin:service:basicevent` | reply reached, copy length **65521** into the `0x64` frame |
 | vendor | `urn:…:service:dial:1` | reply reached, length 4 |
 | vendor | `urn:…:service:ContentDirectory:1` | reply reached, length 16 |
+| vendor | `urn:…:device:MediaServer` (no `:N`) | reply reached, copy length **65512** into the `0x5C` frame |
+| vendor | `urn:…:device:MediaServer:1` | reply reached, length 11 |
 | patched | `urn:Belkin:service:basicevent` | **no reply**, type switch returns 0 |
 | patched | `urn:…:service:dial:1` | reply reached, length 4 |
 | patched | `urn:…:service:ContentDirectory:1` | reply reached, length 16 |
+| patched | `urn:…:device:MediaServer` (no `:N`) | **no reply**, type switch returns 0 |
+| patched | `urn:…:device:MediaServer:1` | reply reached, length 11 |
 
-The vendor Belkin length (65521) is the low 16 bits of the negated service-name
-pointer, confirming §1: a copy far larger than the frame. The patched image drops
-exactly that one case and leaves the two legitimate searches answering with the
-same lengths. The gate is meaningful: on an unpatched image the patched-Belkin
-assertion fails, because Belkin reaches the reply.
-
-The device arm (§2) is **not** patched. The same harness, driving type 5 with
-`urn:schemas-upnp-org:device:MediaServer`, still reaches `urn_device_reply` with a
-length over its `0x5C` frame on both images. That is recorded, not fixed; the §5
-device-arm proposal would need the same guard.
+The vendor overrun lengths (65521 service, 65512 device) are the low 16 bits of the
+negated name pointer, confirming §1 and §2: a copy far larger than the frame. The
+patched image drops exactly the two no-colon cases and leaves every well-formed
+search answering with the same length. The gate is meaningful: on an unpatched image
+the patched assertions fail, because those searches reach the reply.
 
 ## 5. Proposed, not applied
 
@@ -165,16 +172,12 @@ other argument.
 
 ### Network hardening
 
-From §1 and §3, in order, none of it applied:
+The device-arm zero-test (`0x60049AD0`) is now applied in §4, not proposed; the
+replay gate covers it. What is still only proposed:
 
-- The same zero-test in the device arm at `0x60049AD0`, so a `urn:…:device:` value
-  with no version colon takes the ignore path instead of `urn_device_reply`.
 - Drop an M-SEARCH in `UDP_Rec_Check_MSearch_Req` (`0x6006FCFC`) when the ST length
-  is past the size of the reply frame (`0x64`), before `Disc_Srv_Search_Req`.
+  is past the size of the reply frame (`0x64`), before `Disc_Srv_Search_Req`. This
+  would be a second line of defence in front of both arms.
 - Leave the module on a trusted segment. `pk_alloc` already refuses an oversize
   buffer; the TCP, DHCP, DNS and ICMP items in §3 are not located tightly enough
   to patch.
-
-Each of those wants the Unicorn replay from §4, with one extra datagram for the
-device arm (`urn:schemas-upnp-org:device:SomeDevice` with no trailing colon) that
-must return 0 and leave the stack intact.
