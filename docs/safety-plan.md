@@ -130,3 +130,4 @@ blocks 0–2 unless restoring them from the Stage 3 dump.
 |---|---|---|---|---|---|
 | 2026-11-05 | MAIN | none (read-only update-mode session: `S` sub 0 and sub 1) | LAN, TCP 5000 | OK; unit normal after power cycle | 0 / 10 |
 | 2026-11-06 | MAIN | 01.00 + DM-dump patch, sha256 `9470fa59…` | LAN, TCP 5000, `loader_client.py write`; house LAN (rule 7 deviation, user decision) | OK; read-back equal; patch works; **settings reset to defaults**; blocks 0–2 dumped | 1 / 10 |
+| 2026-11-06 | MAIN | settings RAM only (restore of 2026-11-05 backup, sha256 `02bed182…`) | LAN, TCP 5000, `settings-restore`, X+RBNORM exit | OK; presets back; survive standby + power cycle | 1 / 10 (no flash) |
