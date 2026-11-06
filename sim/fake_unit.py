@@ -2,17 +2,25 @@
 """Local stand-in for the AVR-4306 network + MAIN loader, for testing tools/loader_client.py.
 
 Implements the protocol as decompiled from the 6.0.0.4 updater (docs/loader-interface.md
-§2.4–2.6), nothing more:
+§2.4–2.6, §2.8), nothing more:
   telnet port : 'VI?\\r' -> 'VIxxxx\\r';  'RBUPDATE\\r' -> 'RBSTART\\r' and update mode
   loader port : the same two text commands (the vendor update sends them on 5000), and
                 AA frames: C -> C reply in update mode only (silent in normal mode, as the
                 real unit on 2026-11-05); S -> ACK, then data frames of <= 0x400 bytes,
                 each acknowledged by the PC; S is NACKed unless in update mode. As on the
                 real unit, S ignores start/end: sub 0 streams the image (0xF00000..),
-                sub 1 streams RAM 0x0400-0xC3FF
+                sub 1 streams RAM 0x0400-0xC3FF.
+                L (0x4C) -> ACK: begin a load; erases the given flash range (sets 0xFF).
+                P (0x50) -> ACK per frame: image data, written into the in-memory image so
+                a following sub-0 S read-back returns what was written. L/P need update
+                mode. This is the write side the vendor updater uses (FUN_0041a070 /
+                FUN_0041a7e0, loader-interface §2.8); it lets tools/loader_client.py write
+                be tested without a real unit.
 Memory: --image at 0xF00000 (e.g. build/images/MAIN_01.00.flash.bin); RAM 0x0400-0xC3FF
-with low byte of addr*13+5.
---corrupt N sends every Nth data frame with a bad checksum (tests NACK/retry).
+with low byte of addr*13+5. The image is held mutable so L/P writes are visible to S.
+--corrupt N sends every Nth S data frame with a bad checksum (tests read NACK/retry).
+--nack N NACKs the first attempt of every Nth P frame (tests write retry); the retry ACKs.
+--write-out PATH dumps the image after a completed load (last P frame) for the test to check.
 Any other frame type is answered with NACK and logged as a protocol violation.
 
   python3 -I sim/fake_unit.py --image build/images/MAIN_01.00.flash.bin [--corrupt 5]
@@ -75,8 +83,10 @@ def recv_exact(c, n):
     return b
 
 
-def serve_loader(sock, img, corrupt):
+def serve_loader(sock, img, corrupt, nack=0, write_out=None):
     nframe = 0
+    pframe = 0           # count of P frames seen, for --nack scheduling
+    load = None          # (tgt, sub, version, start, end) from the last L, or None
     while True:
         c, _ = sock.accept()
         with c:
@@ -96,6 +106,58 @@ def serve_loader(sock, img, corrupt):
                         if STATE['update']:
                             rep = b'\xAA' + b'C' + bytes([tgt])
                             c.sendall(rep + bytes([ck(rep)]))
+                    elif t == ord('L'):
+                        # begin load: AA 4C tgt sub vh vl start32 end32 ck (15 B total)
+                        f = h + recv_exact(c, 12)
+                        if ck(f[:-1]) != f[-1] or not STATE['update']:
+                            rep = b'\xAAN' + bytes([tgt])
+                            c.sendall(rep + bytes([ck(rep)]))
+                            continue
+                        sub = f[3]
+                        version = int.from_bytes(f[4:6], 'big')
+                        start = int.from_bytes(f[6:10], 'big')
+                        end = int.from_bytes(f[10:14], 'big')
+                        load = (tgt, sub, version, start, end)
+                        print(f'loader: L tgt={tgt} sub={sub} ver={version:#06x} '
+                              f'{start:#08x}-{end:#08x}')
+                        # Erase the flash range the load covers (vendor: erase on first data
+                        # frame; here on L so an incomplete write shows as 0xFF on read-back).
+                        lo = max(start, 0xF00000) - 0xF00000
+                        hi = min(end, 0xF00000 + len(img) - 1) - 0xF00000
+                        if 0 <= lo <= hi < len(img):
+                            img[lo:hi + 1] = b'\xFF' * (hi + 1 - lo)
+                        pframe = 0
+                        ack = b'\xAAA' + bytes([tgt])
+                        c.sendall(ack + bytes([ck(ack)]))
+                    elif t == ord('P'):
+                        # image data: AA 50 tgt status len16 addr32 payload ck
+                        h2 = h + recv_exact(c, 7)        # status, len16, addr32
+                        status = h2[3]
+                        n = int.from_bytes(h2[4:6], 'big')
+                        addr = int.from_bytes(h2[6:10], 'big')
+                        f = h2 + recv_exact(c, n + 1)    # payload + ck
+                        pframe += 1
+                        if ck(f[:-1]) != f[-1] or load is None or not STATE['update']:
+                            STATE['violations'] += 1 if load is None else 0
+                            rep = b'\xAAN' + bytes([tgt])
+                            c.sendall(rep + bytes([ck(rep)]))
+                            continue
+                        if nack and pframe % nack == 0 and pframe not in STATE.setdefault('nacked', set()):
+                            STATE['nacked'].add(pframe)        # NACK once; the retry gets through
+                            rep = b'\xAAN' + bytes([tgt])
+                            c.sendall(rep + bytes([ck(rep)]))
+                            continue
+                        payload = f[10:10 + n]
+                        off = addr - 0xF00000
+                        if 0 <= off and off + n <= len(img):
+                            img[off:off + n] = payload
+                        ack = b'\xAAA' + bytes([tgt])
+                        c.sendall(ack + bytes([ck(ack)]))
+                        if status in (0, 3):             # 'only' or 'last' frame: load done
+                            print(f'loader: load complete, {pframe} P frames')
+                            if write_out:
+                                open(write_out, 'wb').write(bytes(img))
+                            load = None
                     elif t == ord('S'):
                         f = h + recv_exact(c, 10)
                         if ck(f[:-1]) != f[-1] or not STATE['update']:
@@ -145,16 +207,23 @@ def main():
     ap.add_argument('--telnet-port', type=int, default=2323)
     ap.add_argument('--loader-port', type=int, default=5050)
     ap.add_argument('--corrupt', type=int, default=0)
+    ap.add_argument('--nack', type=int, default=0,
+                    help='NACK the first attempt of every Nth P frame (tests write retry)')
+    ap.add_argument('--write-out', default=None,
+                    help='dump the image after a completed load (last P frame)')
     ap.add_argument('--dm', action='store_true', help='answer DMaaaaaa? like the DM patch')
+    ap.add_argument('--start-update', action='store_true',
+                    help='boot already in update mode (skip RBUPDATE; for fast write tests)')
     a = ap.parse_args()
-    img = open(a.image, 'rb').read()
+    img = bytearray(open(a.image, 'rb').read())      # mutable: L/P writes are visible to S
     STATE['dm'] = a.dm
+    STATE['update'] = a.start_update
     STATE['mem'] = lambda x: (x * 7 + 3) & 0xFF if x >= 0xFFC000 else mem_read(img, x)
     ts = socket.create_server(('127.0.0.1', a.telnet_port))
     ls = socket.create_server(('127.0.0.1', a.loader_port))
     threading.Thread(target=serve_telnet, args=(ts,), daemon=True).start()
     print(f'fake unit on 127.0.0.1 telnet {a.telnet_port}, loader {a.loader_port}', flush=True)
-    serve_loader(ls, img, a.corrupt)
+    serve_loader(ls, img, a.corrupt, a.nack, a.write_out)
 
 
 if __name__ == '__main__':

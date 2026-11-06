@@ -88,6 +88,13 @@ After:
 itself, functional MAIN changes carry real brick risk and the options go back to the
 user.
 
+The MAIN writer for Stage 3 (Option C, main-dump-patch.md §5) is built and
+simulator-tested as of 2026-11-06: `tools/loader_client.py write`, MAIN target 1 only,
+the vendor `L`/`P` sequence with a full read-back verify, gated by a two-image sha256
+whitelist and `--confirm-write` (which prints this checklist until given). It has **not**
+been run against the unit; doing so requires the per-write checklist and costs 1 of 10
+MAIN writes, so the write log below is unchanged.
+
 **Last resort** (opening): only if a MAIN write leaves the loader unreachable. Needs the
 ID code from Stage 3. CNVSS high via R602/J305, P65 held low (async mode 2), 3.3 V UART
 on TP501. `tools/mcu_dump.py` to read; a program-capable variant that never touches

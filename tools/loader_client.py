@@ -18,11 +18,19 @@ TCP 5001 is the DM850 bootloader channel; this tool refuses it.
             status 0 = only, 1 = first, 2 = middle, 3 = last frame
   A / N   = AA 'A'|'N' tgt ck                   ACK / NACK from the PC after each data frame
 
-SAFETY (docs/safety-plan.md): the frame builder can only produce C, S, A and N frames. It
-cannot produce L (load/erase) or send P data to the unit, and nothing here sends DM850
-loader commands, RBNORM, or any state-changing control command. `S` is sent only after the
-unit has answered RBUPDATE with RBSTART. Every connection is opened one at a time, with a
-delay, because the DM850 hangs under fast connection churn (docs/lan-access.md).
+SAFETY (docs/safety-plan.md): the read-only frame builder `frame()` can only produce C, S,
+A and N frames. L (load/erase) and P (data) are built only by `write` (frame_l/frame_p),
+which this module exposes as a separate, explicitly gated MAIN-only command (Option C,
+docs/main-dump-patch.md §5). Nothing here sends DM850 loader commands, RBNORM, or any
+state-changing control command, and every builder forces target 1 (MAIN). `S`/`L`/`P` are
+sent only after the unit has answered RBUPDATE with RBSTART. Port 5001 (the DM850
+bootloader channel) is refused. Every connection is opened one at a time, with a delay,
+because the DM850 hangs under fast connection churn (docs/lan-access.md).
+
+`write` enforces its own offline gate: the image must be one of two sha256-pinned files
+(the DM-dump patch build, or vendor 01.00 for rollback), exactly 0xFC000 bytes, and
+--confirm-write must be given after the docs/safety-plan.md per-write checklist is done.
+Never run `write` against the real unit without that checklist.
 
 Commands:
   loader_client.py version --ip IP               'VI?' on the control port (default 5000;
@@ -41,19 +49,44 @@ Commands:
   loader_client.py dmdump  --ip IP [--range A:B]  normal mode; needs the DM patch in MAIN
         (docs/main-dump-patch.md). Sends 'DMaaaaaa?' per 32 bytes on the control port,
         default range 0xFFC000:0xFFFFFF (blocks 0-2). No update mode, no power cycle.
+  loader_client.py write   --ip IP --image PATH --confirm-write
+        MAIN-only firmware write (Option C, docs/main-dump-patch.md §5), the vendor L/P
+        sequence copied from docs/loader-interface.md §2.8. Enters update mode (VI?,
+        RBUPDATE/RBSTART, 15 s) unless --in-update-mode, sends L for 0xF00000-0xFFBFFF
+        then 1008 P frames of 0x400 bytes, then reads the whole application flash back
+        (S sub 0) and checks it byte-for-byte against the image. The image must be one of
+        the two accepted files (sha256-pinned). Afterwards the unit must be power-cycled.
 
 Run with python3 -I. --control-port / --loader-port exist for the local test peer
 (sim/fake_unit.py).
 """
 import argparse, datetime, hashlib, os, re, socket, sys, time
 
-ALLOWED_TYPES = {b'C', b'S', b'A', b'N'}     # frames this tool may ever send
+ALLOWED_TYPES = {b'C', b'S', b'A', b'N'}     # frames the read-only builder may send
 REFUSED_PORTS = {5001}                       # DM850 bootloader commands (FUN_004090A0)
 UPDATE_SETTLE = 15.0                         # vendor wait after RBSTART (0x408137)
 MAX_READ = 0x400000
 # SSManage's settings read S(1, 1, 0x0400, 0x2701) (update-tools.md §3a).
 DEFAULT_RANGES = [(0x0400, 0x2701)]
 DATA_TYPES = (ord('D'), ord('P'))
+
+# ---- write side (MAIN only). Exactly the vendor L/P sequence (loader-interface §2.8). ----
+MAIN_TARGET = 1
+MAIN_START, MAIN_END = 0xF00000, 0xFFBFFF    # application range (blocks 3-20); image file
+MAIN_SIZE = MAIN_END - MAIN_START + 1        # 0xFC000 = 1,032,192 B = 1008 x 0x400
+MAIN_VERSION = 0x0100                        # 'L' version word for "01.00" (vendor value)
+P_CHUNK = 0x400                              # MAIN payload per P frame (target 1)
+L_ACK_SECS = 10.0                            # 'L' ACK timeout (FUN_0041a070 local_4 = 10)
+P_ACK_FIRST_LAST = 60.0                      # first (erase) and last frame (0x3c)
+P_ACK_MIDDLE = 6.0                           # middle frames
+FRAME_RETRIES = 3                            # vendor: initial send + up to 3 retries
+# Offline gate (safety-plan): the only images `write` may send to MAIN. sha256 -> label.
+ACCEPTED_IMAGES = {
+    '9470fa599734b8341cbfae37617702e7f17be8228e622f63a0b5ca5fc2f31a96':
+        'MAIN 01.00 + read-only DM-dump patch (build/patch/MAIN_dm.flash.bin)',
+    '0fcc83501f19dd4f4356ed2120eafaa82d83fc7e7628dab6625867e9e9922d6b':
+        'MAIN 01.00 vendor, unpatched (rollback, build/images/MAIN_01.00.flash.bin)',
+}
 
 
 def ck(b):
@@ -76,6 +109,56 @@ def frame_s(tgt, start, end, sub=0):
     # sub 0: MAIN 01.00's loader ignores start/end and streams 0xF00000-0xFFBFFF (unit,
     # 2026-11-05). sub 1: SSManage's settings read, S(1, 1, 0x0400, 0x2701).
     return frame(b'S', tgt, bytes([sub]) + start.to_bytes(4, 'big') + end.to_bytes(4, 'big'))
+
+
+def frame_l(start, end, version=MAIN_VERSION, sub=0, tgt=MAIN_TARGET):
+    """AA 4C 01 00 vh vl start32 end32 ck (15 B). FUN_0041a070. MAIN only."""
+    if tgt != MAIN_TARGET:
+        raise ValueError('refused: write frames are MAIN (target 1) only')
+    f = (b'\xAA' + b'L' + bytes([tgt, sub]) + version.to_bytes(2, 'big')
+         + start.to_bytes(4, 'big') + end.to_bytes(4, 'big'))
+    return f + bytes([ck(f)])
+
+
+def frame_p(status, addr, payload, tgt=MAIN_TARGET):
+    """AA 50 01 status len16 addr32 payload ck. FUN_0041a7e0. MAIN only."""
+    if tgt != MAIN_TARGET:
+        raise ValueError('refused: write frames are MAIN (target 1) only')
+    if len(payload) > P_CHUNK:
+        raise ValueError('refused: P payload over 0x400 for MAIN')
+    f = (b'\xAA' + b'P' + bytes([tgt, status]) + len(payload).to_bytes(2, 'big')
+         + addr.to_bytes(4, 'big') + bytes(payload))
+    return f + bytes([ck(f)])
+
+
+def read_ack(link, secs):
+    """Read one reply frame to an L/P write. Returns ('ack'|'nack'|'error'|'badck'|
+    'timeout'|'other', frame). Mirrors the unit's A/N/E replies (FUN_0041aca0)."""
+    f = link.read_frame(secs)
+    if f is None:
+        return 'timeout', None
+    if ck(f[:-1]) != f[-1]:
+        return 'badck', f
+    return {ord('A'): 'ack', ord('N'): 'nack', ord('E'): 'error'}.get(f[1], 'other'), f
+
+
+def send_with_retry(link, fr, secs, log, what):
+    """Send one write frame and wait for ACK, retrying as the vendor does: initial send +
+    up to FRAME_RETRIES retries on NACK/timeout/bad reply; an 'E' error frame aborts at
+    once (vendor case 7). Returns True on ACK."""
+    for attempt in range(FRAME_RETRIES + 1):
+        link.send(fr)
+        kind, f = read_ack(link, secs)
+        log(f'< {what} reply: {kind} {desc(f)}')
+        if kind == 'ack':
+            return True
+        if kind == 'error':
+            print(f'{what}: unit returned E (error frame); aborting')
+            return False
+        if attempt < FRAME_RETRIES:
+            log(f'  {what}: {kind}, retry {attempt + 1}/{FRAME_RETRIES}')
+    print(f'{what}: no ACK after {FRAME_RETRIES} retries ({kind}); aborting')
+    return False
 
 
 class Link:
@@ -341,9 +424,146 @@ def read_ranges(a, log, ranges):
     return good == len(ranges)
 
 
+CHECKLIST = """docs/safety-plan.md per-write checklist (confirm each before --confirm-write):
+  [ ] Offline gate passed and recorded (commit hash, image sha256).
+  [ ] Rollback image (vendor MAIN 01.00) packed, verified, on the PC.
+  [ ] Unit + PC on a sine-wave UPS/inverter; no load-shedding or storm due within 2 h.
+  [ ] PC wired directly to the unit (crossover / dedicated switch), static IPs, Wi-Fi off,
+      nothing else talking to the unit.
+  [ ] Settings backup (RAM 0x040C-0x2701 / a .bid) taken and copied off the PC.
+  [ ] Unit AC power-cycled immediately before; DM850 answers ping.
+  [ ] Image set contains only MAIN; no VME stage; no bootloader image.
+During the write: do not touch the unit, cable, PC or mains; do not abort a write in
+progress. This tool writes MAIN only and cannot reach SUB, DSP, the CPLDs or the DM850."""
+
+
+def enter_update_mode(a, log):
+    """Vendor order (FUN_00407C60): VI? in normal mode, then RBUPDATE -> RBSTART, then the
+    15 s settle. Same as cmd_read uses. Returns True if the unit confirmed update mode."""
+    t = Link(a.ip, a.control_port, log)
+    try:
+        t.send(b'VI?\r')
+        ok, got = t.wait_text(b'VI', 3.0)
+    finally:
+        t.close()
+    if not ok:
+        print('VI? not answered in normal mode; nothing changed on the unit.')
+        return False
+    print('VI reply:', got.decode('latin1', 'replace').strip())
+    time.sleep(a.delay)
+    t = Link(a.ip, a.control_port, log)
+    try:
+        for _ in range(3):
+            t.send(b'RBUPDATE\r')
+            ok, _ = t.wait_text(b'RBSTART', 5.0)
+            if ok:
+                break
+        else:
+            print('no RBSTART: the unit did not confirm update mode. Power-cycle it.')
+            return False
+    finally:
+        t.close()
+    print(f'unit confirmed update mode (RBSTART); waiting {UPDATE_SETTLE:.0f} s as the '
+          'vendor tool does')
+    time.sleep(UPDATE_SETTLE)
+    return True
+
+
+def cmd_write(a, log):
+    # --- offline gate (safety-plan): sha256-pinned image, exact size, explicit confirm ---
+    img = open(a.image, 'rb').read()
+    sha = hashlib.sha256(img).hexdigest()
+    if sha not in ACCEPTED_IMAGES:
+        sys.exit(f'refused: {a.image} (sha256 {sha}) is not an accepted MAIN image.\n'
+                 'Only the DM-dump patch build or vendor 01.00 (rollback) may be written.')
+    if len(img) != MAIN_SIZE:
+        sys.exit(f'refused: image is {len(img)} bytes, expected {MAIN_SIZE} '
+                 f'(0x{MAIN_SIZE:X}) for MAIN 0x{MAIN_START:06X}-0x{MAIN_END:06X}.')
+    print(f'image: {a.image}')
+    print(f'       {ACCEPTED_IMAGES[sha]}')
+    print(f'       {len(img)} bytes, sha256 {sha}')
+    log(f'write image {a.image} sha256 {sha} ({ACCEPTED_IMAGES[sha]})')
+    if not a.confirm_write:
+        print('\n' + CHECKLIST)
+        sys.exit('\nrefused: add --confirm-write once the checklist above is done. '
+                 'Never write the real unit without it.')
+    # --- enter update mode (unless already there from a prior session) ---
+    if not a.in_update_mode and not enter_update_mode(a, log):
+        sys.exit('did not enter update mode; nothing written.')
+    nframes = (len(img) + P_CHUNK - 1) // P_CHUNK
+    print(f'\nwriting MAIN 0x{MAIN_START:06X}-0x{MAIN_END:06X}: 1 L frame + {nframes} '
+          f'P frames of 0x{P_CHUNK:X}')
+    l = Link(a.ip, a.loader_port, log)
+    try:
+        # Loader present? (FUN_00408170: C, up to 3 tries.)
+        if not connect_check(l, MAIN_TARGET, log, tries=3):
+            sys.exit('loader did not answer C after RBSTART; nothing written. Power-cycle '
+                     'the unit and check the version screen.')
+        # L: begin load / erase (FUN_0041a070). ACK within 10 s, 3 retries.
+        if not send_with_retry(l, frame_l(MAIN_START, MAIN_END), L_ACK_SECS, log, 'L'):
+            sys.exit('L not acknowledged; the loader did not start the write. The flash is '
+                     'not yet erased. Power-cycle and check the version screen.')
+        print('L acknowledged (load started).')
+        # P: data (FUN_0041a7e0). First frame erases (60 s), middle 6 s, last 60 s.
+        for i in range(nframes):
+            off = i * P_CHUNK
+            payload = img[off:off + P_CHUNK]
+            status = 1 if i == 0 else 3 if i == nframes - 1 else 2
+            secs = P_ACK_FIRST_LAST if status in (1, 3) else P_ACK_MIDDLE
+            addr = MAIN_START + off
+            if not send_with_retry(l, frame_p(status, addr, payload), secs, log,
+                                   f'P[{i + 1}/{nframes}] {addr:#08x}'):
+                sys.exit(f'\nWRITE FAILED at frame {i + 1}/{nframes} ({addr:#08x}). MAIN is '
+                         'now partly written. DO NOT power off mid-thought: follow '
+                         'safety-plan.md recovery (re-run with the rollback image if the '
+                         'loader still answers C).')
+            if status == 1:
+                print('  frame 1 acknowledged (erase done).')
+            elif (i + 1) % 64 == 0 or status == 3:
+                print(f'  {i + 1}/{nframes} ({addr:#08x})', flush=True)
+        print('all data frames acknowledged.')
+    finally:
+        l.close()
+    # --- verify: full S sub-0 read-back, byte-for-byte (Option C / main-dump-patch §5) ---
+    ok = a.no_verify or verify_readback(a, img, log)
+    print('\nNOW: turn the unit off with its power switch, wait 10 s, turn it on '
+          '(vendor manual 3.9-3). Then check the version screen and a VI? query.')
+    if a.no_verify:
+        print('verify skipped (--no-verify); read it back with `read --sub 0` after the '
+              'power cycle.')
+    return ok
+
+
+def verify_readback(a, img, log):
+    print('\nverify: reading the application flash back (S sub 0) and comparing...')
+    l = Link(a.ip, a.loader_port, log)
+    try:
+        if not connect_check(l, MAIN_TARGET, log, tries=3):
+            print('verify: loader did not answer C; read it back manually after the power '
+                  'cycle (`read --sub 0`).')
+            return False
+        got = read_range(l, MAIN_TARGET, MAIN_START, MAIN_END, log, sub=0)
+    finally:
+        l.close()
+    if not got or not got[1]:
+        print('verify: no data read back.')
+        return False
+    first, data = got
+    if first == MAIN_START and data == img:
+        print(f'verify OK: {len(data)} bytes read back equal the image '
+              f'(sha256 {hashlib.sha256(data).hexdigest()}).')
+        return True
+    n = min(len(data), len(img))
+    diff = next((MAIN_START + i for i in range(n) if data[i] != img[i]), None)
+    print(f'verify FAILED: read {len(data)} bytes from {first:#08x}, image {len(img)} bytes '
+          f'from {MAIN_START:#08x}; first difference '
+          f'{"at %#08x" % diff if diff is not None else "beyond the shorter buffer"}.')
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description='read-only AVR-4306 loader-protocol client')
-    ap.add_argument('cmd', choices=['version', 'check', 'read', 'dmdump'])
+    ap.add_argument('cmd', choices=['version', 'check', 'read', 'dmdump', 'write'])
     ap.add_argument('--ip', required=True)
     ap.add_argument('--control-port', type=int, default=5000,
                     help='port for VI?/RBUPDATE (vendor update uses 5000; 23 also answers VI?)')
@@ -357,10 +577,17 @@ def main():
                     help='unit is already in update mode: skip VI?/RBUPDATE')
     ap.add_argument('--delay', type=float, default=2.0, help='seconds between connections')
     ap.add_argument('--confirm-update-mode', action='store_true')
+    ap.add_argument('--image', help='write: firmware image (must be an accepted MAIN image)')
+    ap.add_argument('--confirm-write', action='store_true',
+                    help='write: attest the safety-plan.md checklist is done')
+    ap.add_argument('--no-verify', action='store_true',
+                    help='write: skip the read-back verify (not recommended)')
     ap.add_argument('--log', default=None, help='transcript file (default dumps/loader.log)')
     a = ap.parse_args()
     if a.target != 1:
         sys.exit('refused: only target 1 (MAIN) is supported')
+    if a.cmd == 'write' and not a.image:
+        sys.exit('refused: write needs --image')
     os.makedirs('dumps', exist_ok=True)
     lf = open(a.log or os.path.join('dumps', 'loader.log'), 'a')
 
@@ -370,7 +597,7 @@ def main():
 
     log(f'--- {a.cmd} {a.ip}')
     ok = {'version': cmd_version, 'check': cmd_check, 'read': cmd_read,
-          'dmdump': cmd_dmdump}[a.cmd](a, log)
+          'dmdump': cmd_dmdump, 'write': cmd_write}[a.cmd](a, log)
     sys.exit(0 if ok else 1)
 
 

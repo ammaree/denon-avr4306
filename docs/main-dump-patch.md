@@ -96,6 +96,22 @@ Limits of the offline checks:
 - Version word in `L`: 0x0100, as the vendor sends for this image. The identity string
   at 0xFFBE80 stays "Ver01.00", and the patch is identified by its `DM` reply.
 
+**Status 2026-11-06: C built and simulator-tested, not on the unit.**
+`tools/loader_client.py write` implements it: the vendor `L`/`P` sequence transcribed from
+loader-interface.md §2.8 (`L` = `AA 4C 01 00 0100 F00000 FFBFFF ck`, ACK ≤ 10 s, 3 retries;
+1008 `P` frames of 0x400 B, status 1/2/3, ACK 60 s first/last and 6 s middle, 3 retries
+each; FUN_0041a070 / FUN_0041a7e0), then a full `S` sub-0 read-back compared byte-for-byte
+with the image. Guards: image sha256 must be one of the two pinned files (the patch build
+or vendor 01.00 rollback) and exactly 0xFC000 B; `--confirm-write` is required and prints
+the safety-plan.md checklist until given; target is forced to 1; `L`/`P` builders refuse
+any other target; port 5001 is refused. `sim/fake_unit.py` grew the `L`/`P` write side
+(erase on `L`, data applied to a mutable image so the read-back reflects it, `--nack` to
+exercise retries, `--write-out` to dump what it received). `sim/test_main_write.py` checks
+the frame bytes against the decompile and drives `write` end to end against the fake: both
+images written byte-exact, read-back verify passes, retries recover, update-mode entry
+works (`--slow`), and the refusals hold. **Not yet run against the unit** — that needs the
+per-write checklist (safety-plan.md); it costs 1 of the 10 MAIN writes.
+
 **Rollback:** the same writer with vendor MAIN 01.00, which is byte-equal to the unit's
 flash today (lan-access.md). It costs one more write (2 of 10). The alternative is to
 leave the inert patch in place.

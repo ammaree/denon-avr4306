@@ -269,6 +269,13 @@ power-cycled. Its frame builder refuses anything but C, S, A, N; it refuses port
 `check` NG, settings read and 1 MB application read byte-exact with every 7th data frame
 corrupted (NACK/retry). Used on the unit 2026-11-05 (lan-access.md).
 
+The client also has a MAIN-only **`write`** command (Option C, main-dump-patch.md §5),
+built 2026-11-06. Read-only `frame()` is unchanged (C/S/A/N only); `write` uses separate
+`frame_l`/`frame_p` builders hard-wired to target 1, gated by a two-image sha256 whitelist
+and `--confirm-write`. It is the `L`/`P` sequence of §2.8 below with a full `S` sub-0
+read-back verify. The fake grew the matching `L`/`P` write side; `sim/test_main_write.py`
+checks the frame bytes and drives `write` end to end against the fake. Not on the unit.
+
 ### 2.8 Updater control flow and what one run writes (decompiled 2026-11-06)
 
 Ghidra decompile plus disassembly checks of the 6.0.0.4 updater. Dialog control IDs
