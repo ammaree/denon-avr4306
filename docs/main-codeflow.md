@@ -28,34 +28,34 @@ The update agent (a separate resident task that handles vendor flash updates) ha
 UART1 path (`agent_uart1_rx_isr` 0xF01704, `agent_rx_dequeue` 0xF01242) and INTB table at
 `0xFFBD7C`; it is not the AV application (control-protocol.md correction).
 
-## Application init + super-loop (`app_cold_boot_entry` 0xF00000)
+## Application init + mode dispatch (`app_cold_boot_entry` 0xF00000)
 
-The firmware is a classic **super-loop**. `app_cold_boot_entry` 0xF00000:
+`app_cold_boot_entry` 0xF00000 is a one-time init followed by a jump into a per-mode
+runtime — not a super-loop (corrected in iteration 3; the functions it calls clear RAM
+ranges, i.e. they are init, not per-pass ticks):
 
 ```
 if (RAM 0x0400 != 0x1B) { RAM 0x0400 = 1; flag = cold }  else { flag = warm }  // init marker
-app_init 0xF04190(flag)                                                        // + more init
-... one-time init ...
-main_loop 0xF0003D:
-  do {
-    loop_tick_01 0xF09284; loop_tick_02 0xF0419C; loop_tick_03 0xF0A32A;
-    loop_tick_04_pwr_zone 0xF0227A; loop_tick_05 0xF06BD6; ... (17 ticks total) ...
-    loop_tick_17 0xF732D4;
-    FSET I;                                   // enable interrupts
-    r0 = clamp(RAM 0x0400 - 3, 0..0xC);       // mode selector
-    INDEXWD / JMPI  -> indexed mode dispatch   // per-mode work
-  } while (1);
+init_00 0xF04190(flag)
+... init sequence: init_01..init_17 (each clears/defaults one subsystem's RAM) ...
+app_init_dispatch 0xF0003D:
+  FSET I;                                   // enable interrupts
+  r0 = clamp(RAM 0x0400 - 3, 0..0xC);       // operating-mode selector
+  INDEXWD / JMPI  -> mode handler            // jump table at 0xF00098; does NOT return here
 ```
 
-So each pass runs 17 fixed subsystem ticks, re-enables interrupts, then does an
-indexed-by-mode dispatch keyed on RAM `0x0400`. The serial command engine, the setup menu
-and the display are driven from these ticks and the mode dispatch. The 17 tick functions
-are named `loop_tick_01..17` (roles to be identified in later iterations); `loop_tick_04`
-is the power/zone tick (`0xF0227A`, previously mislabeled as a PW sub-handler).
+The init routines double as a **RAM subsystem map** (each clears its own block):
+`init_06_serial` (0xF3DC3C) clears the serial/command RAM `0x4933-0x5327` (the line buffers
+`0x4A45`/`0x528E` live here); `init_12` (0xF2A97C) the setup-menu region `0x4591+`;
+`init_04_pwr_zone` (0xF0227A) the power/zone state; and so on (docs/main-names.tsv). The
+real runtime loops live inside the per-mode handlers reached by the `JMPI` — tracing those
+is a later iteration.
 
-**Correction:** `0xF02332` (`pwr_is_on`) is a one-line power-state query — `return (0x320C
-& 0x10) != 0` — called from ~30 sites, not the full PW command handler. The earlier trace
-(control-protocol.md) reached it as the leaf of the PW path, but it is a shared query.
+**Corrections logged this pass:** `0xF02332` (`pwr_is_on`) is a one-line power-state query
+— `return (0x320C & 0x10) != 0`, ~30 callers — not the PW command handler. And `0xF0227A`
+is an init routine, not a loop tick or a PW sub-handler. Both earlier labels came from
+reading leaves without the call graph; the whole-program codebase is what let the call
+counts and the init pattern correct them.
 
 ## Serial control protocol flow (the main external surface)
 
