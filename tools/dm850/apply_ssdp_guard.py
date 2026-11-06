@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Assemble tools/dm850/ssdp_guard.S and apply it to a copy of DM850I.
+"""Assemble the DM850 SSDP guards and apply them to a copy of DM850I.
 
-The guard rejects a URN with no version colon after the name. The same cave serves
-both the service arm (0x60049B36, docs/dm850-audit.md §1) and the device arm
-(0x60049AD0, §2): on the non-zero path it does the original subtract and returns
-via bx lr to whichever site called it; on the zero path it branches to 0x60049B77
-(movs r0,#0 and the type-switch epilogue), so neither reply builder runs.
+Three BLs into two caves (docs/dm850-audit.md §4), none sent to the unit:
+
+- ssdp_guard.S cave (0x601CE800) — the per-arm guard. Both the service arm
+  (0x60049B36, §1) and the device arm (0x60049AD0, §2) hold the same two bytes and
+  BL here. On the non-zero path it does the original subtract and returns via bx lr
+  to whichever site called it; on the zero path (a URN name with no version colon)
+  it branches to 0x60049B77 (movs r0,#0 and the type-switch epilogue), so neither
+  reply builder runs.
+- msearch_guard.S cave (0x601CE820) — the dispatch pre-check. receiveData BLs here
+  (0x60136174) just before Disc_Srv_Search_Req; it drops an M-SEARCH whose ST value
+  length (r2) is over 0x40, which keeps both reply copies inside their frames. This
+  is the second line of defence in front of the per-arm guards.
 
 The vendor image is not modified. The patched copy is written under build/patch/
-(git-ignored) and its three bCoD CRCs are recomputed. Nothing is sent to the unit.
+(git-ignored) and its three bCoD CRCs are recomputed.
 
   python3 -I tools/dm850/apply_ssdp_guard.py
 """
@@ -19,17 +26,23 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-SRC_S = os.path.join(HERE, 'ssdp_guard.S')
 IMAGE = os.path.join(ROOT, 'build', 'images', 'DM850I_x.flash.bin')
 OUT = os.path.join(ROOT, 'build', 'patch', 'DM850I_ssdp.flash.bin')
 
 # Big-copy mapping: file offset = 0x161EC + (VA - 0x60008000).
 SDRAM = 0x60008000
 FILE_DELTA = 0x161EC - SDRAM
-# Both arms have the same two instructions and both BL to the one cave.
-SITES = {'service': 0x60049B36, 'device': 0x60049AD0}
-CAVE = 0x601CE800          # zero run 0x601CE424, length 0xC6C
-SITE_BYTES = bytes.fromhex('801b0704')   # subs r0,r0,r6 (1b80); lsls r7,r0,#16 (0407)
+
+# Each guard: a cave assembled from one source, and the sites that BL to it. Every
+# site in a guard must hold the same `site_bytes` (the instructions being replaced).
+GUARDS = [
+    {'name': 'urn', 'src': 'ssdp_guard.S', 'cave': 0x601CE800,
+     'site_bytes': bytes.fromhex('801b0704'),          # subs r0,r0,r6; lsls r7,r0,#16
+     'sites': {'service': 0x60049B36, 'device': 0x60049AD0}},
+    {'name': 'msearch', 'src': 'msearch_guard.S', 'cave': 0x601CE820,
+     'site_bytes': bytes.fromhex('9d98331c'),          # ldr r0,[sp,#0x274]; adds r3,r6,#0
+     'sites': {'dispatch': 0x60136174}},
+]
 
 
 def file_off(va):
@@ -52,11 +65,11 @@ def enc_bl(pc, target):
     return struct.pack('<HH', hw1, hw2)
 
 
-def assemble(obj):
+def assemble(src_path, obj):
     """Prefer arm-none-eabi-gcc; clang's arm-none-eabi target is the fallback."""
-    gcc = ['arm-none-eabi-gcc', '-mthumb', '-march=armv5t', '-c', SRC_S, '-o', obj]
+    gcc = ['arm-none-eabi-gcc', '-mthumb', '-march=armv5t', '-c', src_path, '-o', obj]
     clang = ['clang', '-target', 'arm-none-eabi', '-mthumb', '-march=armv5t',
-             '-c', SRC_S, '-o', obj]
+             '-c', src_path, '-o', obj]
     which = subprocess.call(['sh', '-c', 'command -v arm-none-eabi-gcc >/dev/null'])
     cmd = gcc if which == 0 else clang
     subprocess.check_call(cmd)
@@ -85,28 +98,43 @@ def text_bytes_file(obj, blob):
     raise SystemExit(f'{obj} has no .text section')
 
 
+def build_cave(guard):
+    """Assemble one guard's source and return (cave_bytes, assembler_name)."""
+    base = os.path.join(ROOT, 'build', 'patch', guard['name'] + '_guard')
+    cc = assemble(os.path.join(HERE, guard['src']), base + '.o')
+    cave = text_bytes_file(base + '.o', base + '.bin')
+    if len(cave) < 10 or len(cave) > 48:
+        raise SystemExit(f"{guard['name']} cave is {len(cave)} bytes, expected a short fragment")
+    return cave, cc
+
+
 def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    obj = os.path.join(ROOT, 'build', 'patch', 'ssdp_guard.o')
-    blob = os.path.join(ROOT, 'build', 'patch', 'ssdp_guard.bin')
-    cc = assemble(obj)
-    cave = text_bytes_file(obj, blob)
-    if len(cave) < 16 or len(cave) > 32:
-        raise SystemExit(f'cave is {len(cave)} bytes, expected a short Thumb fragment')
     image = bytearray(open(IMAGE, 'rb').read())
-    co = file_off(CAVE)
-    if any(image[co + i] != 0 for i in range(len(cave))):
-        raise SystemExit(f'cave at {CAVE:#x} is not a zero run')
-    image[co:co + len(cave)] = cave
     placed = []
-    for name, site in SITES.items():
-        so = file_off(site)
-        if image[so:so + 4] != SITE_BYTES:
-            raise SystemExit(f'{name} site {site:#x} is {image[so:so+4].hex()}, '
-                             f'expected {SITE_BYTES.hex()}')
-        bl = enc_bl(site, CAVE)
-        image[so:so + 4] = bl
-        placed.append((name, site, bl))
+    assemblers = set()
+    # Guard against two caves overlapping.
+    occupied = []
+    for guard in GUARDS:
+        cave, cc = build_cave(guard)
+        assemblers.add(cc)
+        co = file_off(guard['cave'])
+        span = (co, co + len(cave))
+        for (lo, hi) in occupied:
+            if span[0] < hi and lo < span[1]:
+                raise SystemExit(f"{guard['name']} cave overlaps another cave")
+        occupied.append(span)
+        if any(image[co + i] != 0 for i in range(len(cave))):
+            raise SystemExit(f"cave at {guard['cave']:#x} is not a zero run")
+        image[co:co + len(cave)] = cave
+        for site_name, site in guard['sites'].items():
+            so = file_off(site)
+            if image[so:so + 4] != guard['site_bytes']:
+                raise SystemExit(f"{guard['name']}/{site_name} site {site:#x} is "
+                                 f"{image[so:so+4].hex()}, expected {guard['site_bytes'].hex()}")
+            bl = enc_bl(site, guard['cave'])
+            image[so:so + 4] = bl
+            placed.append((guard['name'], site_name, site, guard['cave'], bl, len(cave)))
     sys.path.insert(0, os.path.join(ROOT, 'tools'))
     import bcod_sum
     fixed = bcod_sum.fix(bytes(image))
@@ -114,10 +142,9 @@ def main():
     if probs:
         raise SystemExit('CRC check failed: ' + '; '.join(probs))
     open(OUT, 'wb').write(fixed)
-    print(f'assembler {cc}')
-    print(f'cave {CAVE:#x} ({len(cave)} bytes)')
-    for name, site, bl in placed:
-        print(f'  {name} site {site:#x} BL {bl.hex()}')
+    print(f'assembler {" ".join(sorted(assemblers))}')
+    for gname, sname, site, cave, bl, clen in placed:
+        print(f'  {gname}/{sname} site {site:#x} -> cave {cave:#x} BL {bl.hex()}')
     print(f'wrote {OUT}')
 
 

@@ -77,13 +77,17 @@ separated out of them.
 | ICMP | The string `ICMP` at `0x601B1F23` has one word reference and no Thumb literal. | An ICMP datagram, receive function not located. |
 | Allocator | `pk_alloc` (`0x60124BA4`) refuses a size above `bigbufsiz` (`0x708` at `0x601E4FD4`) and refuses a call when the word at `0x00540010` is set. | Not a missing check. Recorded so it is not re-read as one. |
 
-## 4. Patch: ignore a URN name with no colon (service and device arms)
+## 4. Patch: two per-arm guards plus an M-SEARCH length pre-check
 
 Do not flash this. The DM850 has no recovery path if a write fails, and the vendor
 update rewrites the web pages with the code (`docs/loader-interface.md`).
 
-Located changes, Thumb. The two arms hold identical bytes and both branch to one
-cave:
+Three located changes, Thumb, into two caves in the zero run `0x601CE424`–
+`0x601CF090` (no pointer in the SDRAM image lands there).
+
+### 4a. Per-arm guard (`ssdp_guard.S`, cave `0x601CE800`)
+
+The two arms hold identical bytes and both branch to this one cave:
 
 | | Service arm | Device arm |
 |---|---|---|
@@ -92,30 +96,50 @@ cave:
 | Now | `bl 0x601CE800` (`84 f1 63 fe`) | `bl 0x601CE800` (`84 f1 96 fe`) |
 | Return (r0≠0) | `0x60049B3A` | `0x60049AD4` |
 
+On r0 == 0 the cave branches to `0x60049B76` (`movs r0, #0`, then the epilogue), so
+neither reply builder is called. On r0 ≠ 0 it does the original subtract and shift
+and `bx lr` back to whichever site called it, so `dial:1`, `ContentDirectory:1` and
+a valid `urn:…:device:…:1` still get a reply. This stops the no-colon crash (§1, §2).
+
+### 4b. M-SEARCH length pre-check (`msearch_guard.S`, cave `0x601CE820`)
+
+The per-arm guard checks only for a missing colon. A **well-formed** name that is
+simply long (say a 200-byte service name ending in `:1`) still produces a large,
+legitimately-computed copy length — `urn_service_reply`/`urn_device_reply` memcpy it
+into their `0x64`/`0x5C` frames and overrun. `receiveData` already drops a datagram
+of `0x200` bytes or more, but a long name fits well under that.
+
+So a second guard bounds the ST value length before the search is dispatched:
+
 | | |
 |---|---|
-| Cave | `0x601CE800`, file offset `0x1DC9EC` (20 bytes) |
+| Site | `0x60136174`, file offset `0x144360` (in `receiveData`, just before the `bl Disc_Srv_Search_Req` at `0x60136178`) |
+| Was | `ldr r0, [sp, #0x274]` / `adds r3, r6, #0` (`9d 98 33 1c`) |
+| Now | `bl 0x601CE820` (`98 f0 54 fb`) |
 
-The cave is inside the zero run `0x601CE424`–`0x601CF090`. No pointer in the SDRAM
-image lands in that run. `tools/dm850/ssdp_guard.S` is the source. The apply script
-assembles it with `arm-none-eabi-gcc -mthumb -march=armv5t` when that compiler is on
-`PATH`, and otherwise with `clang -target arm-none-eabi`. It checks both site byte
-patterns and the zero run, writes `build/patch/DM850I_ssdp.flash.bin`, and recomputes
-the three bCoD CRCs with `tools/bcod_sum.py`. The patched image differs from the
-vendor image in 35 bytes: the two 4-byte BLs, the 20-byte cave (one byte shared with
-the zero run), and the two bCoD CRC words.
+At this point `r2` holds the ST value length — the same value the arms use as the
+total from which the reply "rest" copy is derived, so `r2` is ≥ the bytes that get
+copied. The cave runs the two displaced instructions, then: if `r2 ≤ 0x40` it
+`bx lr` to the dispatch (`0x60136178`); if `r2 > 0x40` it branches to `0x6013618A`,
+`receiveData`'s own return path, dropping the datagram. `0x40` is below both reply
+frames and above any well-formed UPnP ST, so no real search is lost.
 
-On r0 == 0 the cave branches to `0x60049B76` (`movs r0, #0`, then the epilogue).
-`disc_srv_schedule` (`0x600496D6`) returns immediately when that result is 0, so
-neither reply builder is called. On r0 ≠ 0 the cave does the original subtract and
-shift and `bx lr` back to whichever site called it, so `dial:1`,
-`ContentDirectory:1` and a valid `urn:…:device:…:1` still get a reply.
+### Apply
+
+`tools/dm850/apply_ssdp_guard.py` assembles both sources with `arm-none-eabi-gcc
+-mthumb -march=armv5t` when that compiler is on `PATH`, else `clang -target
+arm-none-eabi`. It checks every site's byte pattern and both zero runs, writes
+`build/patch/DM850I_ssdp.flash.bin`, and recomputes the three bCoD CRCs with
+`tools/bcod_sum.py`. The patched image differs from the vendor image in 58 bytes:
+three 4-byte BLs, the 20-byte arm cave and the 20-byte pre-check cave (each sharing
+one zero byte with the run), and the two bCoD CRC words.
 
 Offline gate, before any flash: `python3 -I tools/dm850/test_ssdp_guard.py` executes
-the assembled cave. A zero search result must branch to `0x60049B77`. A non-zero
-result must leave `r0 = r0 - r6` and `r7 = r0 << 16` and return through `bx lr`. The
-same run rebuilds the patched image and checks both BLs, the cave bytes and the CRCs,
-and that the vendor image is unchanged at both sites.
+the per-arm cave. A zero search result must branch to `0x60049B77`. A non-zero result
+must leave `r0 = r0 - r6` and `r7 = r0 << 16` and return through `bx lr`. The same run
+rebuilds the patched image and checks all three BLs, both caves' bytes and the CRCs,
+and that the vendor image is unchanged at every site. The pre-check cave's own two
+branches are exercised in the replay gate below (it uses an sp-relative load).
 
 ### Replay gate (built, passing)
 
@@ -146,12 +170,20 @@ Measured, and asserted by the script:
 | patched | `urn:…:service:ContentDirectory:1` | reply reached, length 16 |
 | patched | `urn:…:device:MediaServer` (no `:N`) | **no reply**, type switch returns 0 |
 | patched | `urn:…:device:MediaServer:1` | reply reached, length 11 |
+| vendor / patched | `urn:x:service:A×200:1` (well-formed, long) | reply reached, copy length **200** into the `0x64` frame |
 
 The vendor overrun lengths (65521 service, 65512 device) are the low 16 bits of the
 negated name pointer, confirming §1 and §2: a copy far larger than the frame. The
 patched image drops exactly the two no-colon cases and leaves every well-formed
 search answering with the same length. The gate is meaningful: on an unpatched image
 the patched assertions fail, because those searches reach the reply.
+
+The long well-formed name (last row) overruns on **both** images via the arm — its
+name has a colon, so the per-arm guard (§4a) passes it. That is the residual the
+pre-check (§4b) exists for. The harness also runs the pre-check cave directly on the
+patched image: with `r2 = 0x30` it dispatches, with `r2 = 212` (the long ST) it takes
+the drop path to `0x6013618A`. So the datagram never reaches the arm once the
+pre-check is in place.
 
 ## 5. Proposed, not applied
 
@@ -172,12 +204,13 @@ other argument.
 
 ### Network hardening
 
-The device-arm zero-test (`0x60049AD0`) is now applied in §4, not proposed; the
-replay gate covers it. What is still only proposed:
+The device-arm zero-test (`0x60049AD0`) and the M-SEARCH length pre-check are both
+applied in §4 now, not proposed; the replay gate covers them. The pre-check is placed
+at the dispatch guard in `receiveData` (`0x60136174`), where the ST length is already
+in `r2`, rather than inside `UDP_Rec_Check_MSearch_Req`; the effect is the same —
+drop before `Disc_Srv_Search_Req` — and the length is in hand there without re-deriving
+it. What is still only proposed:
 
-- Drop an M-SEARCH in `UDP_Rec_Check_MSearch_Req` (`0x6006FCFC`) when the ST length
-  is past the size of the reply frame (`0x64`), before `Disc_Srv_Search_Req`. This
-  would be a second line of defence in front of both arms.
 - Leave the module on a trusted segment. `pk_alloc` already refuses an oversize
   buffer; the TCP, DHCP, DNS and ICMP items in §3 are not located tightly enough
   to patch.

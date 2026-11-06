@@ -21,14 +21,15 @@ Conclusions, printed and asserted:
 - patched + dial / ContentDirectory / device:1 -> still answered (4 / 16 / 11)
 """
 import os
+import struct
 import sys
 
 try:
     from unicorn import (Uc, UC_ARCH_ARM, UC_MODE_THUMB, UcError, UC_HOOK_CODE,
                          UC_PROT_ALL)
     from unicorn.arm_const import (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
-                                   UC_ARM_REG_R3, UC_ARM_REG_SP, UC_ARM_REG_LR,
-                                   UC_ARM_REG_PC, UC_ARM_REG_CPSR)
+                                   UC_ARM_REG_R3, UC_ARM_REG_R6, UC_ARM_REG_SP,
+                                   UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_CPSR)
 except ImportError:
     sys.exit("unicorn not found. Run from the project venv:\n"
              "  python3 -m venv build/venv && build/venv/bin/pip install unicorn==2.1.4 capstone==5.0.7\n"
@@ -48,6 +49,11 @@ TYPE_SERVICE = 7
 TYPE_DEVICE = 5
 FRAME_SVC = 0x64            # sub sp,#0x64 in urn_service_reply
 FRAME_DEV = 0x5C            # sub sp,#0x5C in urn_device_reply
+# The M-SEARCH dispatch pre-check (msearch_guard.S) and its two exits in receiveData.
+DISPATCH_CAVE = 0x601CE820
+DISPATCH_CONT = 0x60136178  # bl Disc_Srv_Search_Req (r2 in range: dispatch)
+DISPATCH_DROP = 0x6013618A  # receiveData drop/return (r2 over bound)
+ST_BOUND = 0x40             # the bound msearch_guard.S enforces
 
 STACK_BASE = 0x6F000000
 STACK_SIZE = 0x00100000
@@ -78,6 +84,7 @@ class Replay:
         self.uc.mem_map(STACK_BASE, STACK_SIZE, UC_PROT_ALL)
         self.memcpy_calls = []
         self._stopped = None            # 'strstr' or 'memcpy' when a stub halts the run
+        self._dispatch = None           # 'dispatch' or 'drop' from run_dispatch
         uc = self.uc
         uc.hook_add(UC_HOOK_CODE, self._on_code)
 
@@ -118,6 +125,12 @@ class Replay:
             uc.reg_write(UC_ARM_REG_R0, dst)
             self._stopped = 'memcpy'
             uc.emu_stop()
+        elif address == DISPATCH_CONT:
+            self._dispatch = 'dispatch'
+            uc.emu_stop()
+        elif address == DISPATCH_DROP:
+            self._dispatch = 'drop'
+            uc.emu_stop()
 
     def run(self, urn_text, urn_type):
         uc = self.uc
@@ -153,6 +166,25 @@ class Replay:
             return {'reply': False, 'ret': uc.reg_read(UC_ARM_REG_R0), 'clean': True}
         raise SystemExit('replay did not converge (too many stub hops)')
 
+    def run_dispatch(self, st_len):
+        """Execute the dispatch pre-check cave with r2 = st_len. Returns 'dispatch'
+        (r2 in range -> would call Disc_Srv_Search_Req) or 'drop' (r2 over bound ->
+        receiveData's return path). Only valid on the patched image."""
+        uc = self.uc
+        self._dispatch = None
+        uc.reg_write(UC_ARM_REG_SP, SP_INIT)
+        uc.mem_write(SP_INIT + 0x274, struct.pack('<I', URN_ADDR))   # ST pointer slot
+        uc.reg_write(UC_ARM_REG_R6, 0xD0D0D0D0)                      # a marker arg
+        uc.reg_write(UC_ARM_REG_R2, st_len)
+        uc.reg_write(UC_ARM_REG_LR, DISPATCH_CONT | 1)
+        cpsr = uc.reg_read(UC_ARM_REG_CPSR) | (1 << 5)
+        uc.reg_write(UC_ARM_REG_CPSR, cpsr)
+        try:
+            uc.emu_start(DISPATCH_CAVE | 1, 0, count=1000)
+        except UcError:
+            pass
+        return self._dispatch
+
 
 STS = {
     'Belkin': 'Belkin:service:basicevent',
@@ -171,13 +203,21 @@ def describe(r):
     return f"no reply; type switch returned {r['ret']} (clean={r['clean']})"
 
 
+# A long but well-formed service name: the name has a version colon, so the per-arm
+# guard passes it, yet its length overruns the reply frame. Only the dispatch
+# pre-check stops it (its total length is over the bound).
+LONG_TAIL = 'x:service:' + 'A' * 200 + ':1'
+
+
 def main():
     results = {}
+    reps = {}
     for tag, path in (('vendor', M.VENDOR), ('patched', M.PATCHED)):
         if not os.path.exists(path):
             raise SystemExit(f'{tag} image missing: {path}')
         print(f"== {tag} ==")
         rep = Replay(path)
+        reps[tag] = rep
         results[tag] = {}
         for name, tail in STS.items():
             r = rep.run(tail, TYPE_SERVICE)
@@ -189,7 +229,19 @@ def main():
             results[tag][name] = r
             print(f"  device  urn:{tail}")
             print(f"    -> {describe(r)}")
+        r = rep.run(LONG_TAIL, TYPE_SERVICE)
+        results[tag]['long_name'] = r
+        print(f"  service long name ({len(LONG_TAIL)} chars, well-formed)")
+        print(f"    -> {describe(r)}")
         print()
+
+    # Dispatch pre-check on the patched image: a normal-length ST dispatches; an ST
+    # over the bound is dropped before Disc_Srv_Search_Req.
+    d_small = reps['patched'].run_dispatch(0x30)
+    d_long = reps['patched'].run_dispatch(len(LONG_TAIL))
+    print(f"== dispatch pre-check (patched) ==")
+    print(f"  r2=0x30 -> {d_small};  r2={len(LONG_TAIL)} (0x{len(LONG_TAIL):x}) -> {d_long}")
+    print()
 
     v, p = results['vendor'], results['patched']
     # Vendor: Belkin overruns the 0x64 frame; dial and CD are bounded.
@@ -208,6 +260,15 @@ def main():
     assert (not p['device_bad']['reply']) and p['device_bad']['ret'] == 0 and p['device_bad']['clean'], p['device_bad']
     assert v['device_ok']['reply'] and v['device_ok']['len'] == 11, v['device_ok']
     assert p['device_ok']['reply'] and p['device_ok']['len'] == 11, p['device_ok']
+    # A long well-formed service name overruns on BOTH images via the arm (the name
+    # has a colon, so the per-arm guard passes it). This is the residual the dispatch
+    # pre-check exists for; its total length is over the bound.
+    assert v['long_name']['reply'] and v['long_name']['len'] == 200, v['long_name']
+    assert p['long_name']['reply'] and p['long_name']['len'] == 200, p['long_name']
+    assert len(LONG_TAIL) > ST_BOUND
+    # The dispatch pre-check: a normal ST dispatches; the long one is dropped.
+    assert d_small == 'dispatch', d_small
+    assert d_long == 'drop', d_long
 
     print("GATE PASS")
     print(f"  vendor  Belkin copy length {v['Belkin']['len']} > frame {FRAME_SVC}: would smash the stack")
@@ -215,6 +276,8 @@ def main():
     print(f"  patched dial/ContentDirectory still answered (lengths 4 / 16)")
     print(f"  vendor  device URN with no colon overruns (length {v['device_bad']['len']} > frame {FRAME_DEV})")
     print(f"  patched device URN with no colon ignored; valid device URN still answered (length 11)")
+    print(f"  long well-formed name overruns via the arm on both images (length 200 > frame {FRAME_SVC})")
+    print(f"  dispatch pre-check drops an ST over 0x{ST_BOUND:x} before the search; normal ST dispatches")
 
 
 if __name__ == '__main__':

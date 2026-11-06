@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Run the assembled SSDP guard both ways, and check the patched image.
+"""Run the per-arm SSDP guard both ways, and check the patched image.
 
   python3 -I tools/dm850/test_ssdp_guard.py
 
-A zero return from the search (no version colon) must branch to 0x60049B76.
-A non-zero return must do the original `subs r0, r0, r6` / `lsls r7, r0, #16`
-and return to the link register. This is the gate for the cave itself. A replay
-of the whole responder still has to stub Disc_Srv_Search_Req's callees; that is
-described in docs/dm850-audit.md and is not this test.
+The arm cave (ssdp_guard.S) is executed by a tiny Thumb interpreter: a zero search
+result (no version colon) must branch to 0x60049B76; a non-zero result must do the
+original subtract/shift and return through the link register. The patched image is
+then rebuilt and checked: every guard site holds a BL to its cave, each cave's bytes
+are present, the vendor image is unchanged at every site, and the bCoD CRCs match.
+The M-SEARCH dispatch cave (msearch_guard.S) uses an sp-relative load; its two-way
+behaviour is exercised in tools/dm850/replay_ssdp.py under Unicorn, not here.
 """
 import os
 import struct
@@ -19,12 +21,13 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 import apply_ssdp_guard as ap
 
+ARM_GUARD = next(g for g in ap.GUARDS if g['name'] == 'urn')
 
-def load_cave():
-    obj = os.path.join(ROOT, 'build', 'patch', 'ssdp_guard.o')
-    blob = os.path.join(ROOT, 'build', 'patch', 'ssdp_guard.bin')
-    ap.assemble(obj)
-    return ap.text_bytes_file(obj, blob)
+
+def load_cave(guard):
+    base = os.path.join(ROOT, 'build', 'patch', guard['name'] + '_guard')
+    ap.assemble(os.path.join(HERE, guard['src']), base + '.o')
+    return ap.text_bytes_file(base + '.o', base + '.bin')
 
 
 def u16(code, pc):
@@ -32,7 +35,7 @@ def u16(code, pc):
 
 
 def run(code, r0, r6):
-    """Interpret the cave. Returns (r0, r7, where). where is 'lr' or the bx target."""
+    """Interpret the arm cave. Returns (r0, r7, where); where is the bx target."""
     reg = {0: r0, 3: 0, 6: r6, 7: 0}
     pc = 0
     lr = 0x60049B3A
@@ -71,7 +74,7 @@ def run(code, r0, r6):
 
 
 def main():
-    code = load_cave()
+    code = load_cave(ARM_GUARD)
     r0, r7, where = run(code, 0, 0x60100000)
     assert where == 0x60049B77, hex(where)
     assert r0 == 0
@@ -85,20 +88,24 @@ def main():
     # Always rebuild so the test reflects the current apply script.
     subprocess.check_call([sys.executable, os.path.join(HERE, 'apply_ssdp_guard.py')])
     data = open(image, 'rb').read()
-    co = ap.file_off(ap.CAVE)
-    assert data[co:co + len(code)] == code
     vendor = open(ap.IMAGE, 'rb').read()
-    for name, site in ap.SITES.items():
-        so = ap.file_off(site)
-        bl = ap.enc_bl(site, ap.CAVE)
-        assert data[so:so + 4] == bl, f'{name}: {data[so:so+4].hex()}'
-        # The vendor image still has the original instruction at each site.
-        assert vendor[so:so + 4] == ap.SITE_BYTES, name
+    sites = 0
+    for guard in ap.GUARDS:
+        cave = load_cave(guard)
+        co = ap.file_off(guard['cave'])
+        assert data[co:co + len(cave)] == cave, guard['name']
+        for site_name, site in guard['sites'].items():
+            so = ap.file_off(site)
+            bl = ap.enc_bl(site, guard['cave'])
+            assert data[so:so + 4] == bl, f"{guard['name']}/{site_name}: {data[so:so+4].hex()}"
+            # The vendor image still has the original instruction at each site.
+            assert vendor[so:so + 4] == guard['site_bytes'], f"{guard['name']}/{site_name}"
+            sites += 1
     sys.path.insert(0, os.path.join(ROOT, 'tools'))
     import bcod_sum
     probs = bcod_sum.check(data)
     assert not probs, probs
-    print(f'guard ok, cave {len(code)} bytes, both sites BL to cave, image CRCs match')
+    print(f'guard ok, {sites} sites BL to {len(ap.GUARDS)} caves, image CRCs match')
 
 
 if __name__ == '__main__':
