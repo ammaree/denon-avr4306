@@ -21,3 +21,14 @@
     (2026-11-06).
 - Not yet read from the unit: DM850 flash, SUB, DSP, CPLDs. Their vendor images are
   in the updater packages, but the unit's own contents have not been dumped.
+
+## Session notes
+
+- 2026-11-06: Claude Code responses were repeatedly stopped by a safety classifier while
+  writing or reviewing the MAIN writer and the settings-restore code (on Opus 5.5,
+  Fable 5.1 and Sonnet 5.5). Reported to Anthropic via feedback; reference
+  `1d725874-ca39-4736-9c1a-f7bed3fb43ba`. Workaround in use: the owner writes the
+  flash/RAM-write pieces; Claude does analysis, tests, the fake unit, docs and read-only
+  sessions.
+- Run tools that reach the unit with `/usr/bin/python3`: the Homebrew Python is blocked
+  from the LAN (macOS Local Network permission) until allowed in System Settings.
