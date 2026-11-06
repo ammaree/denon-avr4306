@@ -36,6 +36,24 @@ Never run `write` against the real unit without that checklist.
 Commands:
   loader_client.py version --ip IP               'VI?' on the control port (default 5000;
                                                  23 also works), normal mode, read-only
+  loader_client.py status  --ip IP               read-only: 'VI?' parsed into per-processor
+                                                 versions, plus a C probe reporting normal
+                                                 vs update mode. Changes nothing.
+  loader_client.py settings-save --ip IP [--out F] --confirm-update-mode
+                                                 SSManage save (update-tools.md §3a): update
+                                                 mode, S sub 1, slice 0x040C-0x2701, write F,
+                                                 exit X(1,2,1)+RBNORM. Read-only to flash.
+  loader_client.py settings-restore --ip IP --image F --confirm-restore
+                                                 SSManage load: update mode, I model guard,
+                                                 L sub 1 + P of the 8,950-byte settings body
+                                                 to RAM 0x040C-0x2701, exit X+RBNORM. Writes
+                                                 parameter RAM, not flash; no MAIN wear.
+  loader_client.py verify --ip IP --against F [--source flash|dm]
+                                                 read-only: flash = S sub-0 read-back vs F
+                                                 (update mode); dm = DM-patch dump vs F.
+  loader_client.py rollback --ip IP --image F --confirm-write
+                                                 `write` restricted to the vendor (unpatched)
+                                                 MAIN 01.00 image. Counts as a MAIN write.
   loader_client.py check   --ip IP               'C' frame on port 5000. Answered only in
                                                  update mode: the vendor sends it only when
                                                  'VI?' fails. No reply in normal mode is
@@ -62,7 +80,7 @@ Commands:
 Run with python3 -I. --control-port / --loader-port exist for the local test peer
 (sim/fake_unit.py).
 """
-import argparse, datetime, hashlib, os, re, socket, sys, time
+import argparse, datetime, hashlib, json, os, re, socket, sys, time
 
 ALLOWED_TYPES = {b'C', b'S', b'A', b'N'}     # frames the read-only builder may send
 REFUSED_PORTS = {5001}                       # DM850 bootloader commands (FUN_004090A0)
@@ -92,12 +110,29 @@ I_MODEL_OFFSET = 5                           # FUN_0041b290 dword = frame bytes 
                                              # 0xb71-0xb74, frame byte 0 at 0xb6e);
                                              # FUN_004081c0 @ 0x408235 keeps its low 16 bits
 # Offline gate (safety-plan): the only images `write` may send to MAIN. sha256 -> label.
+PATCH_IMAGE_SHA = '9470fa599734b8341cbfae37617702e7f17be8228e622f63a0b5ca5fc2f31a96'
+VENDOR_IMAGE_SHA = '0fcc83501f19dd4f4356ed2120eafaa82d83fc7e7628dab6625867e9e9922d6b'
 ACCEPTED_IMAGES = {
-    '9470fa599734b8341cbfae37617702e7f17be8228e622f63a0b5ca5fc2f31a96':
-        'MAIN 01.00 + read-only DM-dump patch (build/patch/MAIN_dm.flash.bin)',
-    '0fcc83501f19dd4f4356ed2120eafaa82d83fc7e7628dab6625867e9e9922d6b':
-        'MAIN 01.00 vendor, unpatched (rollback, build/images/MAIN_01.00.flash.bin)',
+    PATCH_IMAGE_SHA: 'MAIN 01.00 + read-only DM-dump patch (build/patch/MAIN_dm.flash.bin)',
+    VENDOR_IMAGE_SHA: 'MAIN 01.00 vendor, unpatched (rollback, build/images/MAIN_01.00.flash.bin)',
 }
+
+# ---- settings (SSManage save/restore, update-tools.md §3a). MAIN parameter RAM, NOT flash:
+# a settings restore costs no MAIN flash cycle and cannot brick the unit. ----
+SETTINGS_START, SETTINGS_END = 0x040C, 0x2701    # the .bid body range in MAIN RAM
+SETTINGS_SIZE = SETTINGS_END - SETTINGS_START + 1  # 0x22F6 = 8,950 B
+RAM_START, RAM_END = 0x0400, 0xC3FF              # what a sub-1 S read streams (range ignored)
+SETTINGS_ACK_SECS = 10.0                         # P ACK for the small RAM write (no erase)
+DM_BLOCKS_RANGE = (0xFFC000, 0xFFFFFF)           # resident blocks 0-2 (DM-patch dump range)
+
+
+SESSION = None       # set in main(): the structured session log (dumps/session-log.jsonl)
+
+
+def sev(kind, **kw):
+    """Record one structured session-log event, if a session log is open."""
+    if SESSION is not None:
+        SESSION.event(kind, **kw)
 
 
 def ck(b):
@@ -149,6 +184,15 @@ def frame_i(tgt=MAIN_TARGET, field1=0, field2=0):
         raise ValueError('refused: write frames are MAIN (target 1) only')
     f = (b'\xAA' + b'I' + bytes([tgt])
          + field1.to_bytes(4, 'big') + field2.to_bytes(4, 'big'))
+    return f + bytes([ck(f)])
+
+
+def frame_x_normal(tgt=MAIN_TARGET):
+    """AA 58 01 02 01 ck: SSManage 'Reboot(Normal mode)' mode frame, X(1,2,1) (FUN_00401F40,
+    update-tools.md §3a). A mode change only — no flash write. MAIN only."""
+    if tgt != MAIN_TARGET:
+        raise ValueError('refused: X frame is MAIN (target 1) only')
+    f = b'\xAA' + b'X' + bytes([tgt, 0x02, 0x01])
     return f + bytes([ck(f)])
 
 
@@ -301,41 +345,17 @@ def cmd_version(a, log):
 def cmd_dmdump(a, log):
     """Normal mode, needs the DM patch in MAIN (docs/main-dump-patch.md): one
     'DMaaaaaa?' line per 32 bytes, reply 'DMaaaaaa' + 64 hex digits + CR."""
-    start, end = a.range[0] if a.range else (0xFFC000, 0xFFFFFF)
-    if start % 32 or (end + 1) % 32 or not 0xF00000 <= start <= end <= 0xFFFFFF:
-        sys.exit('refused: range must be 32-byte aligned inside 0xF00000-0xFFFFFF')
-    t = Link(a.ip, a.control_port, log)
-    data = bytearray()
-    try:
-        for addr in range(start, end + 1, 32):
-            want = f'DM{addr:06X}'.encode()
-            for attempt in range(3):
-                t.send(f'DM{addr:06X}?\r'.encode())
-                deadline = time.time() + 3.0
-                line = None
-                while time.time() < deadline:
-                    i = t.buf.find(want)
-                    if i >= 0 and t.buf.find(b'\r', i) >= 0:
-                        j = t.buf.find(b'\r', i)
-                        line, t.buf = t.buf[i:j], t.buf[j + 1:]
-                        break
-                    t.fill(deadline)
-                if line and len(line) == 72 and re.fullmatch(rb'[0-9A-F]{64}', line[8:]):
-                    break
-                log(f'  {addr:06X}: bad/missing reply {line!r}, retry')
-            else:
-                sys.exit(f'no valid reply for {addr:06X} after 3 tries; '
-                         'is the DM patch installed?')
-            data += bytes.fromhex(line[8:].decode())
-            if addr % 0x400 == 0:
-                print(f'  {addr:06X}', flush=True)
-    finally:
-        t.close()
+    start, end = a.range[0] if a.range else DM_BLOCKS_RANGE
+    data = dm_read_range(a, log, start, end)
+    if data is None:
+        return False
     d = os.path.join('dumps', 'dm-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
     os.makedirs(d, exist_ok=True)
     p = os.path.join(d, f'main_{start:06X}_{end:06X}.bin')
     open(p, 'wb').write(data)
-    print(f'{p}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}')
+    sha = hashlib.sha256(data).hexdigest()
+    print(f'{p}: {len(data)} bytes, sha256 {sha}')
+    sev('dmdump', path=p, start=start, end=end, bytes=len(data), sha256=sha)
     return True
 
 
@@ -532,6 +552,8 @@ def cmd_write(a, log):
     print(f'       {ACCEPTED_IMAGES[sha]}')
     print(f'       {len(img)} bytes, sha256 {sha}')
     log(f'write image {a.image} sha256 {sha} ({ACCEPTED_IMAGES[sha]})')
+    sev('flash-write-start', image=a.image, sha256=sha, label=ACCEPTED_IMAGES[sha],
+        note='counts as 1 MAIN flash cycle (safety-plan.md rule 5)')
     if not a.confirm_write:
         print('\n' + CHECKLIST)
         sys.exit('\nrefused: add --confirm-write once the checklist above is done. '
@@ -589,11 +611,17 @@ def cmd_write(a, log):
     # Also keeps the connection churn down (docs/lan-access.md).
     time.sleep(max(POST_WRITE_SETTLE, a.delay))
     ok = a.no_verify or verify_readback(a, img, log)
+    sev('flash-write-done', verified=(None if a.no_verify else ok), sha256=sha)
     print('\nNOW: turn the unit off with its power switch, wait 10 s, turn it on '
           '(vendor manual 3.9-3). Then check the version screen and a VI? query.')
     if a.no_verify:
         print('verify skipped (--no-verify); read it back with `read --sub 0` after the '
               'power cycle.')
+    print('\nsafety-plan.md write-log row (fill Date/Path/Result, bump MAIN cycles):')
+    print(f'  | {datetime.datetime.now():%Y-%m-%d} | MAIN | {ACCEPTED_IMAGES[sha]}, '
+          f'sha256 `{sha[:8]}…` | LAN, TCP 5000, loader_client.py '
+          f'{"rollback" if sha == VENDOR_IMAGE_SHA else "write"} | '
+          f'{"read-back equal" if ok else "VERIFY FAILED"} | +1 |')
     return ok
 
 
@@ -624,9 +652,323 @@ def verify_readback(a, img, log):
     return False
 
 
+class Session:
+    """Append-only structured session log (dumps/session-log.jsonl), one JSON line per
+    event, each tagged with the session id — a machine-readable record of what the tool
+    did to the unit, alongside the dumps/loader.log frame transcript. Events: start, the
+    key protocol milestones, every file written (with sha256), flash writes (with the MAIN
+    wear note for safety-plan.md), and end."""
+
+    def __init__(self, path, cmd, ip):
+        self.path = path
+        self.id = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+        self.event('start', cmd=cmd, ip=ip)
+
+    def event(self, kind, **kw):
+        rec = {'session': self.id,
+               't': datetime.datetime.now().isoformat(timespec='seconds'),
+               'kind': kind, **kw}
+        with open(self.path, 'a') as f:
+            f.write(json.dumps(rec) + '\n')
+
+
+def exit_normal(a, log):
+    """SSManage 'Reboot(Normal mode)' (FUN_00401F40, update-tools.md §3a): X(1,2,1) on the
+    loader port (no reply; the vendor just waits), then RBNORM -> RBSTART on the control
+    port. Returns True if RBSTART was seen. No flash write."""
+    l = Link(a.ip, a.loader_port, log)
+    try:
+        l.send(frame_x_normal())
+    finally:
+        l.close()
+    time.sleep(a.delay)
+    t = Link(a.ip, a.control_port, log)
+    try:
+        t.send(b'RBNORM\r')
+        ok, _ = t.wait_text(b'RBSTART', 5.0)
+    finally:
+        t.close()
+    sev('exit-normal', rbstart=ok)
+    return ok
+
+
+def finish_session_mode(a, log):
+    """End an update-mode session: the SSManage X(1,2,1)+RBNORM exit, or (--power-cycle-exit)
+    the manual power cycle the updater/read path uses."""
+    if a.power_cycle_exit:
+        print('\nNOW: turn the unit off with its power switch, wait 10 s, turn it on, then '
+              'check a VI? query.')
+        sev('exit-power-cycle')
+        return True
+    print('\nexiting update mode: X(1,2,1) + RBNORM (SSManage Reboot(Normal mode))...')
+    time.sleep(a.delay)
+    ok = exit_normal(a, log)
+    print('RBNORM confirmed (RBSTART); unit back in normal mode.' if ok else
+          'RBNORM not confirmed — power-cycle the unit to be sure it is back to normal.')
+    return ok
+
+
+def parse_vi(reply):
+    """Split a VI? reply ('VI01:0100;02:0050;...') into {id: value}."""
+    body = reply[reply.find('VI') + 2:] if 'VI' in reply else reply
+    out = {}
+    for part in body.split(';'):
+        part = part.strip()
+        if ':' in part:
+            k, v = part.split(':', 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+VI_LABELS = {0x01: 'MAIN', 0x02: 'SUB', 0x03: 'DSP', 0x0A: 'DM850', 0x0B: 'CPLD'}
+
+
+def cmd_status(a, log):
+    """Read-only, normal mode: VI? parsed into per-processor versions, then a normal-mode C
+    probe to report whether the unit is in normal or update mode. Changes nothing."""
+    t = Link(a.ip, a.control_port, log)
+    try:
+        t.send(b'VI?\r')
+        ok, got = t.wait_text(b'VI', 3.0)
+    finally:
+        t.close()
+    if not ok:
+        print('VI? not answered. The unit may be off, mid-boot, or in update mode.')
+        sev('status', vi=False)
+        return False
+    reply = got.decode('latin1', 'replace').strip()
+    fields = parse_vi(reply)
+    print('VI reply:', reply)
+    print('versions:')
+    for k, v in fields.items():
+        try:
+            lbl = VI_LABELS.get(int(k, 16), f'id {k}')
+        except ValueError:
+            lbl = f'id {k}'
+        print(f'  {k} {lbl:5} {v}')
+    time.sleep(a.delay)
+    l = Link(a.ip, a.loader_port, log)
+    try:
+        mode_update = connect_check(l, MAIN_TARGET, log)   # C: silent in normal mode
+    finally:
+        l.close()
+    print('mode:', 'UPDATE MODE (loader answered C)' if mode_update
+          else 'normal (loader silent, as expected)')
+    sev('status', vi=True, versions=fields, update_mode=mode_update)
+    return True
+
+
+def cmd_settings_save(a, log):
+    """SSManage save (update-tools.md §3a): update mode, C, S sub 1 (returns all RAM), slice
+    the settings body 0x040C-0x2701, write it, then the X(1,2,1)+RBNORM exit. Read-only to
+    flash; no MAIN wear."""
+    if not a.confirm_update_mode:
+        sys.exit('refused: settings-save enters update mode (RBUPDATE). Follow '
+                 'docs/safety-plan.md (UPS, direct cable, nothing else on the LAN), then '
+                 'add --confirm-update-mode.')
+    out = a.out or os.path.join(
+        'dumps', 'settings-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + '.bin')
+    if not a.in_update_mode and not enter_update_mode(a, log):
+        sys.exit('did not enter update mode; nothing read.')
+    l = Link(a.ip, a.loader_port, log)
+    try:
+        if not connect_check(l, MAIN_TARGET, log, tries=3):
+            sys.exit('loader did not answer C after RBSTART.')
+        got = read_range(l, MAIN_TARGET, RAM_START, RAM_END, log, sub=1)
+    finally:
+        l.close()
+    if not got or not got[1]:
+        sys.exit('settings-save: no RAM read back.')
+    first, data = got
+    lo = SETTINGS_START - first
+    if lo < 0 or lo + SETTINGS_SIZE > len(data):
+        sys.exit(f'settings-save: RAM read {first:#06x}+{len(data)} B does not cover '
+                 f'{SETTINGS_START:#06x}-{SETTINGS_END:#06x}.')
+    body = bytes(data[lo:lo + SETTINGS_SIZE])
+    os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
+    open(out, 'wb').write(body)
+    sha = hashlib.sha256(body).hexdigest()
+    print(f'\n{out}: {len(body)} bytes (RAM {SETTINGS_START:#06x}-{SETTINGS_END:#06x}), '
+          f'sha256 {sha}')
+    sev('settings-save', path=out, bytes=len(body), sha256=sha)
+    return finish_session_mode(a, log)
+
+
+def cmd_settings_restore(a, log):
+    """SSManage load (update-tools.md §3a, FUN_00402370 -> FUN_00403280): update mode, C, I
+    (model guard), L sub 1 for 0x040C-0x2701, P frames of the 8,950-byte settings body, then
+    the X(1,2,1)+RBNORM exit. Writes MAIN parameter RAM, not flash: no MAIN wear."""
+    if not a.image:
+        sys.exit('refused: settings-restore needs --image (an 8,950-byte RAM settings file, '
+                 'e.g. a settings-save output or a .bid body).')
+    body = open(a.image, 'rb').read()
+    if len(body) != SETTINGS_SIZE:
+        sys.exit(f'refused: {a.image} is {len(body)} bytes, expected {SETTINGS_SIZE} '
+                 f'(0x{SETTINGS_SIZE:X}) for RAM {SETTINGS_START:#06x}-{SETTINGS_END:#06x}.')
+    sha = hashlib.sha256(body).hexdigest()
+    print(f'settings image: {a.image} ({len(body)} bytes, sha256 {sha})')
+    if not a.confirm_restore:
+        sys.exit('refused: settings-restore writes the MAIN parameter RAM (0x040C-0x2701). '
+                 'It does not touch flash and costs no MAIN write, but it enters update '
+                 'mode. Add --confirm-restore to proceed.')
+    sev('settings-restore-start', path=a.image, bytes=len(body), sha256=sha)
+    if not a.in_update_mode and not enter_update_mode(a, log):
+        sys.exit('did not enter update mode; nothing written.')
+    nframes = (len(body) + P_CHUNK - 1) // P_CHUNK
+    l = Link(a.ip, a.loader_port, log)
+    try:
+        if not connect_check(l, MAIN_TARGET, log, tries=3):
+            sys.exit('loader did not answer C after RBSTART.')
+        model = query_model(l, log)
+        if model is None:
+            sys.exit('I (target information) not answered; settings not restored.')
+        if model != MAIN_MODEL_CODE:
+            sys.exit(f'refused: unit model code {model:#06x} != {MAIN_MODEL_CODE:#06x} '
+                     '(AVR-4306). Settings not restored.')
+        print(f'unit model code {model:#06x} confirmed (AVR-4306).')
+        # L for the RAM settings range: sub 1, version 0 (FUN_00403280 -> FUN_004038f0).
+        if not send_with_retry(l, frame_l(SETTINGS_START, SETTINGS_END, version=0, sub=1),
+                               L_ACK_SECS, log, 'L(settings)'):
+            sys.exit('L not acknowledged; settings not restored.')
+        for i in range(nframes):
+            off = i * P_CHUNK
+            payload = body[off:off + P_CHUNK]
+            status = 1 if i == 0 else 3 if i == nframes - 1 else 2
+            addr = SETTINGS_START + off
+            if not send_with_retry(l, frame_p(status, addr, payload), SETTINGS_ACK_SECS, log,
+                                   f'P[{i + 1}/{nframes}] {addr:#06x}'):
+                sys.exit(f'settings restore failed at frame {i + 1}/{nframes}. The parameter '
+                         'RAM is partly written; power-cycle the unit to clear it, then '
+                         'retry (no flash was touched).')
+        print(f'settings written: {nframes} P frames to RAM '
+              f'{SETTINGS_START:#06x}-{SETTINGS_END:#06x}.')
+    finally:
+        l.close()
+    sev('settings-restore-done', frames=nframes)
+    ok = finish_session_mode(a, log)
+    print('Then check that your inputs and FM presets are back.')
+    return ok
+
+
+def dm_read_range(a, log, start, end):
+    """Normal mode, DM patch (main-dump-patch.md): 'DMaaaaaa?' per 32 bytes; returns the
+    bytes read, or None on a missing/invalid reply. No file is written here."""
+    if start % 32 or (end + 1) % 32 or not 0xF00000 <= start <= end <= 0xFFFFFF:
+        sys.exit('refused: range must be 32-byte aligned inside 0xF00000-0xFFFFFF')
+    t = Link(a.ip, a.control_port, log)
+    data = bytearray()
+    try:
+        for addr in range(start, end + 1, 32):
+            want = f'DM{addr:06X}'.encode()
+            line = None
+            for _ in range(3):
+                t.send(f'DM{addr:06X}?\r'.encode())
+                deadline = time.time() + 3.0
+                while time.time() < deadline:
+                    i = t.buf.find(want)
+                    if i >= 0 and t.buf.find(b'\r', i) >= 0:
+                        j = t.buf.find(b'\r', i)
+                        line, t.buf = t.buf[i:j], t.buf[j + 1:]
+                        break
+                    t.fill(deadline)
+                if line and len(line) == 72 and re.fullmatch(rb'[0-9A-F]{64}', line[8:]):
+                    break
+                log(f'  {addr:06X}: bad/missing reply {line!r}, retry')
+                line = None
+            if line is None:
+                print(f'no valid reply for {addr:06X} after 3 tries; is the DM patch installed?')
+                return None
+            data += bytes.fromhex(line[8:].decode())
+            if addr % 0x4000 == 0:
+                print(f'  {addr:06X}', flush=True)
+    finally:
+        t.close()
+    return bytes(data)
+
+
+def flash_read_back(a, log):
+    """Enter update mode and S sub-0 read the whole application flash (0xF00000-0xFFBFFF).
+    Returns the bytes, or None. Settings-safe: a read-only session does not reset them."""
+    if not a.in_update_mode and not enter_update_mode(a, log):
+        return None
+    l = Link(a.ip, a.loader_port, log)
+    try:
+        if not connect_check(l, MAIN_TARGET, log, tries=3):
+            print('loader did not answer C after RBSTART.')
+            return None
+        got = read_range(l, MAIN_TARGET, MAIN_START, MAIN_END, log, sub=0)
+    finally:
+        l.close()
+    return got[1] if got and got[1] else None
+
+
+def compare(data, ref, base, log):
+    """Print and log a byte-for-byte comparison of `data` against reference `ref`."""
+    got_sha, ref_sha = hashlib.sha256(data).hexdigest(), hashlib.sha256(ref).hexdigest()
+    if data == ref:
+        print(f'MATCH: {len(data)} bytes, sha256 {got_sha}')
+        sev('verify', result='match', bytes=len(data), sha256=got_sha)
+        return True
+    n = min(len(data), len(ref))
+    diff = next((base + i for i in range(n) if data[i] != ref[i]), None)
+    where = (f'first difference at {diff:#08x}' if diff is not None
+             else f'equal for {n} bytes but lengths differ ({len(data)} vs {len(ref)})')
+    print(f'MISMATCH: read sha256 {got_sha}, reference sha256 {ref_sha}; {where}')
+    sev('verify', result='mismatch', bytes=len(data), sha256=got_sha,
+        ref_sha256=ref_sha, first_diff=diff)
+    return False
+
+
+def cmd_verify(a, log):
+    """Dump a region and compare it to a reference file. --source flash: S sub-0 read-back of
+    the application flash (update mode), compared to --against (an image). --source dm: the
+    DM-patch dump of --range (default blocks 0-2), compared to --against. Read-only."""
+    if not a.against:
+        sys.exit('refused: verify needs --against FILE (the reference to compare to).')
+    ref = open(a.against, 'rb').read()
+    if a.source == 'dm':
+        start, end = a.range[0] if a.range else DM_BLOCKS_RANGE
+        print(f'verify (DM dump {start:#08x}-{end:#08x}) against {a.against}...')
+        data = dm_read_range(a, log, start, end)
+        base = start
+    else:                                   # flash read-back
+        if not a.confirm_update_mode:
+            sys.exit('refused: verify --source flash enters update mode (RBUPDATE). Add '
+                     '--confirm-update-mode (it does not reset settings).')
+        if len(ref) != MAIN_SIZE:
+            sys.exit(f'refused: --against is {len(ref)} bytes, expected {MAIN_SIZE} '
+                     f'(0x{MAIN_SIZE:X}) for the application flash.')
+        print(f'verify (flash read-back) against {a.against}...')
+        data = flash_read_back(a, log)
+        base = MAIN_START
+    if data is None:
+        print('verify: nothing read back.')
+        return False
+    ok = compare(data, ref, base, log)
+    if a.source == 'flash' and not a.in_update_mode:
+        print('\nNOW: power-cycle the unit (off, 10 s, on), then check a VI? query.')
+    return ok
+
+
+def cmd_rollback(a, log):
+    """Write the vendor (unpatched) MAIN 01.00 image — the rollback image. Same sequence and
+    guards as `write`; counts as a MAIN flash write. Refuses anything but the vendor image."""
+    if not a.image:
+        sys.exit('refused: rollback needs --image (the vendor MAIN 01.00 image).')
+    sha = hashlib.sha256(open(a.image, 'rb').read()).hexdigest()
+    if sha != VENDOR_IMAGE_SHA:
+        sys.exit(f'refused: {a.image} (sha256 {sha}) is not the vendor MAIN 01.00 image. '
+                 'rollback writes only the unpatched vendor image; use `write` for the patch.')
+    print('ROLLBACK: writing the vendor (unpatched) MAIN 01.00 image.')
+    sev('rollback', image=a.image, sha256=sha)
+    return cmd_write(a, log)
+
+
 def main():
     ap = argparse.ArgumentParser(description='read-only AVR-4306 loader-protocol client')
-    ap.add_argument('cmd', choices=['version', 'check', 'read', 'dmdump', 'write'])
+    ap.add_argument('cmd', choices=['version', 'status', 'check', 'read', 'dmdump',
+                                    'settings-save', 'settings-restore', 'verify',
+                                    'write', 'rollback'])
     ap.add_argument('--ip', required=True)
     ap.add_argument('--control-port', type=int, default=5000,
                     help='port for VI?/RBUPDATE (vendor update uses 5000; 23 also answers VI?)')
@@ -640,17 +982,30 @@ def main():
                     help='unit is already in update mode: skip VI?/RBUPDATE')
     ap.add_argument('--delay', type=float, default=2.0, help='seconds between connections')
     ap.add_argument('--confirm-update-mode', action='store_true')
-    ap.add_argument('--image', help='write: firmware image (must be an accepted MAIN image)')
+    ap.add_argument('--image', help='write/rollback: firmware image; settings-restore: the '
+                    '8,950-byte RAM settings file')
+    ap.add_argument('--out', help='settings-save: output file (default dumps/settings-<ts>.bin)')
+    ap.add_argument('--against', help='verify: reference file to compare the read-back to')
+    ap.add_argument('--source', choices=['flash', 'dm'], default='flash',
+                    help='verify: flash = S sub-0 read-back (update mode); dm = DM-patch dump')
     ap.add_argument('--confirm-write', action='store_true',
-                    help='write: attest the safety-plan.md checklist is done')
+                    help='write/rollback: attest the safety-plan.md checklist is done')
+    ap.add_argument('--confirm-restore', action='store_true',
+                    help='settings-restore: proceed with the RAM settings write (no flash)')
+    ap.add_argument('--power-cycle-exit', action='store_true',
+                    help='settings-save/restore: exit by power cycle instead of X+RBNORM')
     ap.add_argument('--no-verify', action='store_true',
                     help='write: skip the read-back verify (not recommended)')
     ap.add_argument('--log', default=None, help='transcript file (default dumps/loader.log)')
+    ap.add_argument('--session-log', default=None,
+                    help='structured session log (default dumps/session-log.jsonl)')
     a = ap.parse_args()
     if a.target != 1:
         sys.exit('refused: only target 1 (MAIN) is supported')
-    if a.cmd == 'write' and not a.image:
-        sys.exit('refused: write needs --image')
+    if a.cmd in ('write', 'rollback') and not a.image:
+        sys.exit(f'refused: {a.cmd} needs --image')
+    if a.cmd == 'settings-restore' and not a.image:
+        sys.exit('refused: settings-restore needs --image')
     os.makedirs('dumps', exist_ok=True)
     lf = open(a.log or os.path.join('dumps', 'loader.log'), 'a')
 
@@ -658,9 +1013,17 @@ def main():
         lf.write(f'{datetime.datetime.now().isoformat(timespec="milliseconds")} {msg}\n')
         lf.flush()
 
-    log(f'--- {a.cmd} {a.ip}')
-    ok = {'version': cmd_version, 'check': cmd_check, 'read': cmd_read,
-          'dmdump': cmd_dmdump, 'write': cmd_write}[a.cmd](a, log)
+    global SESSION
+    SESSION = Session(a.session_log or os.path.join('dumps', 'session-log.jsonl'), a.cmd, a.ip)
+    log(f'--- {a.cmd} {a.ip} (session {SESSION.id})')
+    ok = False
+    try:
+        ok = {'version': cmd_version, 'status': cmd_status, 'check': cmd_check,
+              'read': cmd_read, 'dmdump': cmd_dmdump, 'settings-save': cmd_settings_save,
+              'settings-restore': cmd_settings_restore, 'verify': cmd_verify,
+              'write': cmd_write, 'rollback': cmd_rollback}[a.cmd](a, log)
+    finally:
+        sev('end', ok=bool(ok))
     sys.exit(0 if ok else 1)
 
 

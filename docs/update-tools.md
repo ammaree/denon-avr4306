@@ -126,6 +126,21 @@ path to the settings. `tools/loader_client.py read` does steps 1–4 without `SY
 instead of step 5. On the unit the sub-1 read returns all RAM 0x0400–0xC3FF; the range
 in the frame is ignored (lan-access.md, 2026-11-05).
 
+**Load (restore) flow, decompiled 2026-11-06 (`ssml.c` `FUN_00401B40`).** The load-mode
+state machine is: "Reboot(Load mode)" (same `RBUPDATE`→`RBSTART` entry) → `C` → target
+information → `FUN_00402370`, which reads the `.bid` file, checks its model/region/version
+against the unit (`FUN_00402720`), and writes the body with `FUN_00403280`:
+`FUN_004038F0(1, 1, 0, 0x040C, 0x2701)` = an `L` with **sub-byte 1** (RAM) for the settings
+range, then `FUN_00403C50` streams the 0x22F6-byte body as `P` frames → "Reboot(Normal
+mode)" = `X(1,2,1)` + `RBNORM`. So restore is the same `L`/`P` path as a firmware write but
+with sub 1 and a RAM range — **it writes parameter RAM, not flash**.
+
+Both flows are implemented and simulator-tested (not re-run on the unit): `loader_client.py
+settings-save` (steps 1–4 + the X+RBNORM exit of step 5) and `settings-restore` (`L` sub 1
++ `P` to RAM 0x040C–0x2701 + X+RBNORM). `FUN_004038F0`/`FUN_00403C50` were not in the
+decompile dump; their frame layout is taken from the updater's `L`/`P`
+(`FUN_0041A070`/`FUN_0041A7E0`) — a difference to confirm against a real restore.
+
 ## 4. Open items
 
 1. Disassemble the FWCV tool (x86, MFC) to recover the exact framing of `P/L/S/C/D`

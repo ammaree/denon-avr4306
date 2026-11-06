@@ -103,6 +103,10 @@ def test_frames():
     check('I reply: other model passed through', _query(reply(0x1234)) == 0x1234)
     check('I reply: bad checksum rejected', _query(reply(0x0011, badck=True)) is None)
 
+    check('offline gate: exactly two accepted images', len(lc.ACCEPTED_IMAGES) == 2)
+    check('read-only frame() still refuses L', _refuses(lambda: lc.frame(b'L', 1)))
+    check('read-only frame() still refuses P', _refuses(lambda: lc.frame(b'P', 1)))
+
 
 class _StubLink:
     def __init__(self, data):
@@ -119,10 +123,6 @@ class _StubLink:
 
 def _query(data):
     return lc.query_model(_StubLink(data), lambda m: None, secs=0.2)
-
-    check('offline gate: exactly two accepted images', len(lc.ACCEPTED_IMAGES) == 2)
-    check('read-only frame() still refuses L', _refuses(lambda: lc.frame(b'L', 1)))
-    check('read-only frame() still refuses P', _refuses(lambda: lc.frame(b'P', 1)))
 
 
 def _refuses(fn):

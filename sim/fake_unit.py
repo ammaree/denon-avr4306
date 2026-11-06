@@ -13,12 +13,15 @@ Implements the protocol as decompiled from the 6.0.0.4 updater (docs/loader-inte
                 I (0x49) -> fixed 54-byte reply carrying the model code at frame bytes
                 5-6 (--model, default 0x0011 = AVR-4306) and a decoy at bytes 7-8;
                 --i-badck corrupts its checksum; needs update mode.
-                L (0x4C) -> ACK: begin a load; erases the given flash range (sets 0xFF).
-                P (0x50) -> ACK per frame: image data, written into the in-memory image so
-                a following sub-0 S read-back returns what was written. L/P need update
-                mode. This is the write side the vendor updater uses (FUN_0041a070 /
-                FUN_0041a7e0, loader-interface §2.8); it lets tools/loader_client.py write
-                be tested without a real unit.
+                L (0x4C) -> ACK: begin a load. sub-0 flash load erases the range (sets 0xFF);
+                sub-1 settings load (RAM 0x040C-0x2701) just overwrites.
+                P (0x50) -> ACK per frame: data written into flash (img) or RAM per the
+                address, so a following S read returns what was written. L/P need update mode.
+                X (0x58) -> consumed (no reply): SSManage X(1,2,1) 'Reboot(Normal mode)'.
+                RBNORM\\r -> RBSTART and leaves update mode (the SSManage exit).
+                This is the write/restore side the vendor tools use (FUN_0041a070/FUN_0041a7e0;
+                SSManage FUN_00402370->FUN_00403280); it lets `write`, `settings-save`,
+                `settings-restore`, `verify` and `rollback` be tested without a real unit.
 Memory: --image at 0xF00000 (e.g. build/images/MAIN_01.00.flash.bin); RAM 0x0400-0xC3FF
 with low byte of addr*13+5. The image is held mutable so L/P writes are visible to S.
 --corrupt N sends every Nth S data frame with a bad checksum (tests read NACK/retry).
@@ -40,7 +43,7 @@ def ck(b):
 
 def mem_read(img, addr):
     if 0x0400 <= addr <= 0xC3FF:
-        return (addr * 13 + 5) & 0xFF
+        return STATE['ram'][addr - 0x0400]        # mutable: settings restore writes here
     if 0xF00000 <= addr < 0xF00000 + len(img):
         return img[addr - 0xF00000]
     return 0
@@ -57,6 +60,10 @@ def control_line(c, line):
         c.sendall(b'VI01:0100;02:0050;03:0004;\r')
     elif line == b'RBUPDATE':
         STATE['update'] = True
+        c.sendall(b'RBSTART\r')
+    elif line == b'RBNORM':
+        # SSManage 'Reboot(Normal mode)' exit (update-tools.md §3a): leave update mode.
+        STATE['update'] = False
         c.sendall(b'RBSTART\r')
     else:
         print('control: unexpected', line)
@@ -128,6 +135,12 @@ def serve_loader(sock, img, corrupt, nack=0, write_out=None):
                         bad = 1 if STATE.get('i_badck') else 0
                         c.sendall(rep + bytes([(ck(rep) + bad) & 0xFF]))   # 3 + 50 + 1 = 54 B
                         print(f'loader: I -> model {model:#06x}')
+                    elif t == ord('X'):
+                        # SSManage 'Reboot(Normal mode)' mode frame X(1,2,1): AA 58 tgt 02 01
+                        # ck (6 B). The vendor expects no reply (it just waits), so consume
+                        # and stay quiet; RBNORM is what actually leaves update mode.
+                        f = h + recv_exact(c, 3)
+                        print(f'loader: X(1,2,1) mode frame {f.hex(" ")}')
                     elif t == ord('L'):
                         # begin load: AA 4C tgt sub vh vl start32 end32 ck (15 B total)
                         f = h + recv_exact(c, 12)
@@ -142,12 +155,14 @@ def serve_loader(sock, img, corrupt, nack=0, write_out=None):
                         load = (tgt, sub, version, start, end)
                         print(f'loader: L tgt={tgt} sub={sub} ver={version:#06x} '
                               f'{start:#08x}-{end:#08x}')
-                        # Erase the flash range the load covers (vendor: erase on first data
+                        # Flash load (sub 0): erase the range (vendor erases on the first data
                         # frame; here on L so an incomplete write shows as 0xFF on read-back).
-                        lo = max(start, 0xF00000) - 0xF00000
-                        hi = min(end, 0xF00000 + len(img) - 1) - 0xF00000
-                        if 0 <= lo <= hi < len(img):
-                            img[lo:hi + 1] = b'\xFF' * (hi + 1 - lo)
+                        # RAM load (sub 1, settings): no erase, just overwrite.
+                        if start >= 0xF00000:
+                            lo = max(start, 0xF00000) - 0xF00000
+                            hi = min(end, 0xF00000 + len(img) - 1) - 0xF00000
+                            if 0 <= lo <= hi < len(img):
+                                img[lo:hi + 1] = b'\xFF' * (hi + 1 - lo)
                         pframe = 0
                         ack = b'\xAAA' + bytes([tgt])
                         c.sendall(ack + bytes([ck(ack)]))
@@ -170,15 +185,21 @@ def serve_loader(sock, img, corrupt, nack=0, write_out=None):
                             c.sendall(rep + bytes([ck(rep)]))
                             continue
                         payload = f[10:10 + n]
-                        off = addr - 0xF00000
-                        if 0 <= off and off + n <= len(img):
-                            img[off:off + n] = payload
+                        if 0xF00000 <= addr and addr - 0xF00000 + n <= len(img):
+                            img[addr - 0xF00000:addr - 0xF00000 + n] = payload   # flash
+                        elif 0x0400 <= addr and addr - 0x0400 + n <= len(STATE['ram']):
+                            STATE['ram'][addr - 0x0400:addr - 0x0400 + n] = payload  # RAM/settings
                         ack = b'\xAAA' + bytes([tgt])
                         c.sendall(ack + bytes([ck(ack)]))
                         if status in (0, 3):             # 'only' or 'last' frame: load done
                             print(f'loader: load complete, {pframe} P frames')
-                            if write_out:
-                                open(write_out, 'wb').write(bytes(img))
+                            if write_out and load is not None:
+                                _, _, _, ls, le = load
+                                if ls >= 0xF00000:
+                                    blob = bytes(img[ls - 0xF00000:le - 0xF00000 + 1])
+                                else:
+                                    blob = bytes(STATE['ram'][ls - 0x0400:le - 0x0400 + 1])
+                                open(write_out, 'wb').write(blob)
                             load = None
                     elif t == ord('S'):
                         f = h + recv_exact(c, 10)
@@ -242,6 +263,9 @@ def main():
                     help="send the 'I' reply with a bad checksum (tests rejection)")
     a = ap.parse_args()
     img = bytearray(open(a.image, 'rb').read())      # mutable: L/P writes are visible to S
+    # Parameter RAM 0x0400-0xC3FF, seeded with the old synthetic pattern; settings restore
+    # (L sub 1 + P) overwrites it, and a sub-1 S read streams it back.
+    STATE['ram'] = bytearray((x * 13 + 5) & 0xFF for x in range(0x0400, 0xC400))
     STATE['dm'] = a.dm
     STATE['update'] = a.start_update
     STATE['model'] = a.model

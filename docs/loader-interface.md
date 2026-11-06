@@ -275,7 +275,22 @@ built 2026-11-06. Read-only `frame()` is unchanged (C/S/A/N only); `write` uses 
 and `--confirm-write`. It follows the vendor order `C` → `I` → `L` → `P` of §2.8 (the `I`
 model code must be 0x0011 or it aborts before any erase) with a full `S` sub-0 read-back
 verify. The fake grew the matching `I`/`L`/`P` write side; `sim/test_main_write.py` checks
-the frame bytes and drives `write` end to end against the fake. Not on the unit.
+the frame bytes and drives `write` end to end against the fake. Used on the unit
+2026-11-06 to deliver the DM-dump patch (lan-access.md).
+
+The client is no longer read-only. Beyond `version`/`check`/`read`/`dmdump`/`write` it has
+(all simulator-tested, `sim/test_tools.py` / `make sim-toolstest`):
+- **`status`** — read-only VI? parsed per processor, plus a normal-mode `C` probe to report
+  normal vs update mode.
+- **`settings-save`** / **`settings-restore`** — the SSManage flows (update-tools.md §3a).
+  Save = `S` sub 1 then slice 0x040C–0x2701; restore = `L` **sub 1** + `P` of the 8,950-byte
+  body to parameter **RAM** (not flash, no MAIN wear). Both exit by X(1,2,1)+RBNORM
+  (`frame_x_normal`, `RBNORM`), or `--power-cycle-exit`.
+- **`verify`** — `S` sub-0 read-back, or the DM dump, compared byte-for-byte to a reference.
+- **`rollback`** — `write` restricted to the vendor image.
+- A structured per-run log in `dumps/session-log.jsonl`.
+
+`frame()` is still C/S/A/N only; `L`/`P`/`I`/`X` have their own MAIN-only builders.
 
 ### 2.8 Updater control flow and what one run writes (decompiled 2026-11-06)
 

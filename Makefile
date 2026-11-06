@@ -14,7 +14,7 @@ BUILD := build
 IMAGES := $(BUILD)/images
 DISASM := $(BUILD)/disasm
 
-.PHONY: images verify disasm sim-selftest sim-uarttest sim-writetest clean
+.PHONY: images verify disasm sim-selftest sim-uarttest sim-writetest sim-toolstest clean
 .DEFAULT_GOAL := images
 
 # Unpack the updater zip (and the recovery package if present) into build/, then extract.
@@ -61,6 +61,11 @@ sim-uarttest:
 sim-writetest:
 	python3 -I sim/test_main_write.py \
 	   $(IMAGES)/MAIN_01.00.flash.bin $(BUILD)/patch/MAIN_dm.flash.bin $(if $(SLOW),--slow,)
+
+# The other tools (status, settings-save/restore, verify, rollback, session log).
+sim-toolstest:
+	python3 -I sim/test_tools.py \
+	   $(IMAGES)/MAIN_01.00.flash.bin $(BUILD)/patch/MAIN_dm.flash.bin
 
 clean:
 	rm -rf $(BUILD)

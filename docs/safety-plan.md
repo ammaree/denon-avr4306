@@ -68,10 +68,10 @@ During:
 - [ ] Do not touch the unit, cable, PC or mains. Do not abort a write in progress.
 
 After:
-- [ ] Version screen shows the expected versions.
-- [ ] Read-only control queries (`tools/lan_dump.py`) answer as before.
+- [ ] Version screen shows the expected versions (`loader_client.py status`).
+- [ ] Read-only control queries (`loader_client.py status`, `tools/lan_dump.py`) answer as before.
 - [ ] Web UI reachable; MAC unchanged (00:05:CD:13:81:94).
-- [ ] Settings restored from `.bid`; write logged below.
+- [ ] Settings restored (`loader_client.py settings-restore`, or from a `.bid`); write logged below.
 
 ## Stages
 
@@ -88,12 +88,28 @@ After:
 itself, functional MAIN changes carry real brick risk and the options go back to the
 user.
 
-The MAIN writer for Stage 3 (Option C, main-dump-patch.md §5) is built and
-simulator-tested as of 2026-11-06: `tools/loader_client.py write`, MAIN target 1 only,
-the vendor `L`/`P` sequence with a full read-back verify, gated by a two-image sha256
-whitelist and `--confirm-write` (which prints this checklist until given). It has **not**
-been run against the unit; doing so requires the per-write checklist and costs 1 of 10
-MAIN writes, so the write log below is unchanged.
+The MAIN writer for Stage 3 (Option C, main-dump-patch.md §5) is `tools/loader_client.py
+write`: MAIN target 1 only, the vendor `C`→`I`→`L`→`P` sequence with a full read-back
+verify, gated by a two-image sha256 whitelist and `--confirm-write` (which prints this
+checklist until given). It was run on the unit on 2026-11-06 to deliver the DM-dump patch
+(write-log row below; 1 of 10 MAIN writes used, settings reset by the write).
+
+`loader_client.py` has grown the rest of the per-unit tooling, all simulator-tested
+against `sim/fake_unit.py` (`make sim-writetest sim-toolstest`) and **not yet re-run on the
+unit beyond the write above**:
+- `status` — read-only VI? + a mode probe. `verify` — read-back (S sub 0, or the DM dump)
+  compared byte-for-byte to a reference; read-only.
+- `settings-save` / `settings-restore` — the SSManage save/load flows (update-tools.md §3a):
+  save reads the parameter RAM 0x040C–0x2701; restore writes it back with `L` sub 1 + `P`.
+  **RAM, not flash** — a restore costs no MAIN flash cycle and cannot brick the unit — but
+  it enters update mode, so it needs `--confirm-restore` and the environment parts of this
+  checklist. This is how the settings reset by a MAIN write are recovered.
+- `rollback` — `write` restricted to the vendor (unpatched) image; counts as a MAIN write.
+- Every run appends a structured record to `dumps/session-log.jsonl` (git-ignored).
+
+The X(1,2,1)+RBNORM update-mode exit used by save/restore is decompiled (update-tools.md
+§3a) but not yet exercised on the unit; `--power-cycle-exit` falls back to the proven
+power-cycle exit.
 
 **Last resort** (opening): only if a MAIN write leaves the loader unreachable. Needs the
 ID code from Stage 3. CNVSS high via R602/J305, P65 held low (async mode 2), 3.3 V UART
