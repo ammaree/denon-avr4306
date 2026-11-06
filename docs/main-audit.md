@@ -117,22 +117,45 @@ f17f72: PUSH.L A0 ; PUSH.L #0x414E ; JSR 0xF1B270   ; copy 15 bytes to display b
 So the mapping is inverted from the printed digit: `0x40A6 = 0` → `DIMMER: 3` (brightest),
 `0x40A6 = 3` → `DIMMER: 0` (off). The printed digit is `3 - 0x40A6`.
 
-`0x0040A6` is the setup menu's **shared current-value register** — it has 70 references
-and is compared against different limits (`0x11`, `3`, `1`, …) by other menu-line builders,
-so it holds whichever item is active, the dimmer among them. It is working RAM, **outside**
-the settings-backup range `0x040C–0x2701`, so the *persistent* dimmer level lives in that
-settings block and is staged into `0x40A6` by the menu getter when the dimmer item opens.
+### Trace result (2026-11-06): 0x40A6 is menu scratch, not the dimmer's own variable
 
-**Still to pin (one sim-trace, the PW-handler method in `docs/control-protocol.md`):**
-1. the **persistent offset** in `0x040C–0x2701` — found from the menu getter that writes
-   `0x40A6` (a register store, not an immediate) when the dimmer item is selected;
-2. the **VFD apply** — the function the menu's confirm/up-down path calls to push the new
-   brightness to the display. 0x40A6 alone is display state; the apply is what changes the
-   panel.
+Tracing `0x40A6` further **corrected the earlier read**. `0x40A6` is the setup menu's
+**shared staged display value**, not a dimmer global:
 
-With those two, the new command writes the persistent byte, sets `0x40A6`, and calls the
-apply — then it and its offline (sim) gate are fully specified. This is menu-set + driver
-tracing, not VFD-driver reverse-engineering from scratch.
+- The dimmer display builder is `0xF17F4E`, entry **index 2** in a builder-pointer table at
+  `0xF7E035` (`0xF17DB8, 0xF17EB8, 0xF17F4E, 0xF17F92, 0xF17FD6, …`). A second builder table
+  sits at `0xF7DFF1`. Dozens of these builders each read `0x40A6`, `SHL #4`, and index their
+  own string table (dimmer → `0xF80872`; another → `0xF7EE60`; …) into display buffer `0x414E`.
+- Elsewhere (`0xF13650` ff.) the same byte is read with `BTST` as a **bitfield**, and other
+  builders compare it against `0x11`, `1`, etc. So `0x40A6` holds whatever the active menu
+  item needs — it is a scratch register, reused, **not** the dimmer level in storage.
+- The dispatcher that stages `0x40A6` and indexes the builder table is **not reachable by
+  value-scan**: nothing references `0xF7E035` as an abs24 or raw immediate, so the table base
+  is computed (from a higher menu descriptor). Pinning the staging statically means tracing
+  the System Setup menu engine from the `SS` entry down — a long manual trace, not a quick one.
+
+So `0x40A6` is **not** a byte a command can poke to set brightness; it only reflects the
+on-screen value while the dimmer item is open.
+
+### How to pin the two remaining facts — empirically, read-only (recommended)
+
+Static value-scan has gone as far as it reliably can. The persistent level and the apply are
+cleanest to pin on the unit, read-only, no flash:
+
+1. **Persistent dimmer byte** — on the unit: set the dimmer to a known level on the front
+   panel, run `loader_client.py settings-save`; change the level; save again; **diff** the two
+   `0x040C–0x2701` captures. The byte that tracks the level is the persistent offset. This is
+   the same read-only update-mode session already proven (lan-access.md), costs no flash cycle.
+2. **VFD apply** — either continue the static trace from the System Setup engine / the
+   front-panel DIMMER key handler to the function that writes the display controller, or
+   observe it dynamically once the persistent byte is known (watch what the firmware touches
+   when the level changes). The apply is what a remote command must call after setting the byte.
+
+**Implication for the enhancement:** the remote dimmer command is **not** a trivial poke — the
+level lives in the menu engine, reached through staging and an apply that are not yet pinned.
+The version bump (§2) is the sure, low-cost content for the p1 write; the dimmer command is a
+larger follow-on, unblocked by the read-only settings-RAM diff above (one short unit session)
+plus the apply trace, each then gated offline before it joins a MAIN write.
 
 ## 4. Watchdog / timing (open — affects what p1 must include)
 
@@ -157,10 +180,12 @@ One write, version-bumped, carrying every change that is gated and ready:
 1. **Version bump `01.00 → 01.01`** (§2) — makes a patched unit self-identifying and
    retroactively versions the DM-dump patch already present. Confirm the `VI?` source
    first (§2 follow-up).
-2. **Remote dimmer command** (§3) — the dimmer is a 4-level MAIN menu parameter with the
-   get/set/apply machinery already present; the command hooks into it. Ready to specify
-   once the dim-level state variable and apply call are pinned by the bounded sim-trace in
-   §3. Batch it with the version bump so one cycle delivers both.
+2. **Remote dimmer command** (§3) — a larger follow-on, not a quick add. The level lives in
+   the setup-menu engine (the `0x40A6` scratch only mirrors it on screen); the command must
+   set the persistent byte in `0x040C–0x2701` and call the VFD apply, neither of which is
+   pinned yet. Unblock with the read-only settings-RAM diff on the unit (§3) plus the apply
+   trace, gate it offline, then it can join a MAIN write. Do **not** hold the version bump
+   for it — ship §1 as its own p1 content if the dimmer work is not ready.
 3. **Watchdog refresh** in long operations (§4) — only if §4 shows MAIN uses the watchdog.
 4. **Decision on the DM-dump patch:** keep it (it is inert unless a `DM` line arrives) or
    drop it in the same write. The 01.01 image can include or exclude it.
