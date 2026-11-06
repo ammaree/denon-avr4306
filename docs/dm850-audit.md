@@ -109,13 +109,42 @@ result must leave `r0 = r0 - r6` and `r7 = r0 << 16` and return to `0x60049B3A`.
 The same run checks the patched image's site, cave bytes and CRCs, and that the
 vendor image is unchanged.
 
-The test still does not replay a datagram through `receiveData`. That replay is the
-remaining gate: load the patched `disc_srv_type_switch` and its callees under
-Unicorn or QEMU, stub `strstr` with the real one, and send
-`urn:Belkin:service:basicevent`, `urn:dial-multiscreen-org:service:dial:1` and
-`urn:schemas-upnp-org:service:ContentDirectory:1`. The first must return 0 with the
-stack above the frame intact. The other two must still reach `urn_service_reply`
-with a length of 4 and 16.
+### Replay gate (built, passing)
+
+`tools/dm850/replay_ssdp.py` runs the real responder under Unicorn and is the
+replay gate. It reconstructs both images with `tools/dm850/dm850_mem.py` (the same
+scatter replay as `LoadDm850.java`), enters the type switch (`0x60049A80`) with
+`r0` = URN type and `r1` = the text after `urn:` exactly as `Disc_Srv_Search_Req`
+calls it, and runs the real service arm and `urn_service_reply` up to the copy.
+`strstr` and `memcpy` are stubbed in Python, so nothing outside the arm executes
+and no oversized write actually runs; the length the responder would hand `memcpy`
+is what is measured. It needs Unicorn, so it runs from the project venv:
+
+    python3 -m venv build/venv
+    build/venv/bin/pip install unicorn==2.1.4 capstone==5.0.7
+    build/venv/bin/python tools/dm850/replay_ssdp.py
+
+Measured, and asserted by the script:
+
+| Image | ST | Result |
+|---|---|---|
+| vendor | `urn:Belkin:service:basicevent` | reply reached, copy length **65521** into the `0x64` frame |
+| vendor | `urn:…:service:dial:1` | reply reached, length 4 |
+| vendor | `urn:…:service:ContentDirectory:1` | reply reached, length 16 |
+| patched | `urn:Belkin:service:basicevent` | **no reply**, type switch returns 0 |
+| patched | `urn:…:service:dial:1` | reply reached, length 4 |
+| patched | `urn:…:service:ContentDirectory:1` | reply reached, length 16 |
+
+The vendor Belkin length (65521) is the low 16 bits of the negated service-name
+pointer, confirming §1: a copy far larger than the frame. The patched image drops
+exactly that one case and leaves the two legitimate searches answering with the
+same lengths. The gate is meaningful: on an unpatched image the patched-Belkin
+assertion fails, because Belkin reaches the reply.
+
+The device arm (§2) is **not** patched. The same harness, driving type 5 with
+`urn:schemas-upnp-org:device:MediaServer`, still reaches `urn_device_reply` with a
+length over its `0x5C` frame on both images. That is recorded, not fixed; the §5
+device-arm proposal would need the same guard.
 
 ## 5. Proposed, not applied
 
