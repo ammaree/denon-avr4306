@@ -100,13 +100,39 @@ Enhancement design for p1:
    off, add it. Check whether the level **persists** across standby/power-cycle and, if
    not, store it with the other settings.
 
-**Remaining precise work before the write (bounded):** pin the **dim-level state variable**
-(the byte the menu set-handler reads/writes) and the **apply call**, by sim-tracing the
-menu handler around `0xF17F6E`/`0xF1B270` the way `docs/control-protocol.md` traced the PW
-handler (auto-analysis does not resolve the M32C menu boundaries cleanly). That gives the
-exact variable the new command must write and the exact apply to call — then the command
-and its offline (sim) gate can be specified. This is one or two functions of tracing, not
-a VFD-driver reverse-engineering effort.
+### Dim-level variable (pinned) and what is left
+
+The setup-menu value byte for the dimmer is **`0x0040A6`**. The dimmer line builder
+(`0xF17F30`–`0xF17F90`) reads it directly (Ghidra M16C/80 disassembly, confirmed):
+
+```
+f17f5e: CMP.B:Q #0x3,0x0040A6     ; reject level > 3
+f17f62: JGTU  0xF17F82
+f17f66: MOV.B:G 0x0040A6,A0        ; A0 = level (0..3)
+f17f6a: SHL.W #0x4,A0              ; level * 16 (string stride)
+f17f6c: ADD.L:G #0xF80872,A0        ; A0 = 0xF80872 + level*16  -> "DIMMER: N" string
+f17f72: PUSH.L A0 ; PUSH.L #0x414E ; JSR 0xF1B270   ; copy 15 bytes to display buf 0x414E
+```
+
+So the mapping is inverted from the printed digit: `0x40A6 = 0` → `DIMMER: 3` (brightest),
+`0x40A6 = 3` → `DIMMER: 0` (off). The printed digit is `3 - 0x40A6`.
+
+`0x0040A6` is the setup menu's **shared current-value register** — it has 70 references
+and is compared against different limits (`0x11`, `3`, `1`, …) by other menu-line builders,
+so it holds whichever item is active, the dimmer among them. It is working RAM, **outside**
+the settings-backup range `0x040C–0x2701`, so the *persistent* dimmer level lives in that
+settings block and is staged into `0x40A6` by the menu getter when the dimmer item opens.
+
+**Still to pin (one sim-trace, the PW-handler method in `docs/control-protocol.md`):**
+1. the **persistent offset** in `0x040C–0x2701` — found from the menu getter that writes
+   `0x40A6` (a register store, not an immediate) when the dimmer item is selected;
+2. the **VFD apply** — the function the menu's confirm/up-down path calls to push the new
+   brightness to the display. 0x40A6 alone is display state; the apply is what changes the
+   panel.
+
+With those two, the new command writes the persistent byte, sets `0x40A6`, and calls the
+apply — then it and its offline (sim) gate are fully specified. This is menu-set + driver
+tracing, not VFD-driver reverse-engineering from scratch.
 
 ## 4. Watchdog / timing (open — affects what p1 must include)
 
