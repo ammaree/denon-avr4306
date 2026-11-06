@@ -88,6 +88,38 @@ def test_frames():
     check('I frame refuses non-MAIN target', _refuses(lambda: lc.frame_i(tgt=2)))
     check('model code constant = 0x0011 (AVR-4306)', lc.MAIN_MODEL_CODE == 0x0011)
 
+    # Reply parsing, independent of the fake: a reply laid out as the vendor reads it
+    # (FUN_0041b290: dword from frame bytes 3-6; FUN_004081c0 keeps the low 16 bits, i.e.
+    # frame bytes 5-6), with different values in every other byte.
+    def reply(model, badck=False):
+        r = bytearray(range(0x30, 0x30 + 53))
+        r[0:3] = b'\xAA\x49\x01'
+        r[5:7] = model.to_bytes(2, 'big')
+        r += bytes([(sum(r) + badck) & 0xFF])
+        return bytes(r)
+    check('I reply is 54 bytes', len(reply(0x0011)) == lc.I_REPLY_LEN)
+    check('I reply: model read from frame bytes 5-6',
+          _query(reply(0x0011)) == 0x0011, hex(_query(reply(0x0011)) or 0))
+    check('I reply: other model passed through', _query(reply(0x1234)) == 0x1234)
+    check('I reply: bad checksum rejected', _query(reply(0x0011, badck=True)) is None)
+
+
+class _StubLink:
+    def __init__(self, data):
+        self.buf, self.sent = b'', []
+        self._data = data
+
+    def send(self, b):
+        self.sent.append(b)
+
+    def fill(self, deadline):
+        self.buf, self._data = self.buf + self._data, b''
+        return True
+
+
+def _query(data):
+    return lc.query_model(_StubLink(data), lambda m: None, secs=0.2)
+
     check('offline gate: exactly two accepted images', len(lc.ACCEPTED_IMAGES) == 2)
     check('read-only frame() still refuses L', _refuses(lambda: lc.frame(b'L', 1)))
     check('read-only frame() still refuses P', _refuses(lambda: lc.frame(b'P', 1)))
@@ -170,6 +202,15 @@ def test_wrong_model(image):
           not os.path.exists(out))
 
 
+def test_bad_i_checksum(image):
+    out = tempfile.NamedTemporaryFile(suffix='.bin', delete=False).name
+    os.unlink(out)
+    with Fake(image, start_update=True, i_badck=True, write_out=out) as fk:
+        rc, log = run_write(fk, image, '--in-update-mode', '--confirm-write')
+    check('bad I checksum: write refused (exit != 0)', rc != 0, log[-300:])
+    check('bad I checksum: nothing erased or written', not os.path.exists(out))
+
+
 def test_retry(image):
     out = tempfile.NamedTemporaryFile(suffix='.bin', delete=False).name
     with Fake(image, start_update=True, nack=200, write_out=out) as fk:
@@ -228,6 +269,7 @@ def main():
     test_write(vendor, 'vendor rollback image')
     test_retry(patch)
     test_wrong_model(patch)
+    test_bad_i_checksum(patch)
     test_refusals(patch)
     if slow:
         print('   (--slow) full update-mode entry, includes the vendor 15 s settle...')

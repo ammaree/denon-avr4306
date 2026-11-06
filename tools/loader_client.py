@@ -86,8 +86,11 @@ FRAME_RETRIES = 3                            # vendor: initial send + up to 3 re
 # 'I' target-information frame, sent between C and L (loader-interface §2.8 "Before L").
 I_ACK_SECS = 10.0                            # FUN_0041d3f0 local_4 = 10 after the send
 I_REPLY_LEN = 54                             # fixed 54-byte 'I' reply (FUN_0041b290)
-MAIN_MODEL_CODE = 0x0011                     # reply payload bytes 5-6; container "0011"
-                                             # (FUN_00407C60 @ 0x407d81). 2-byte, BE.
+MAIN_MODEL_CODE = 0x0011                     # I reply frame bytes 5-6 (BE); container "0011"
+                                             # (FUN_00407C60 @ 0x407d81)
+I_MODEL_OFFSET = 5                           # FUN_0041b290 dword = frame bytes 3-6 (buffer
+                                             # 0xb71-0xb74, frame byte 0 at 0xb6e);
+                                             # FUN_004081c0 @ 0x408235 keeps its low 16 bits
 # Offline gate (safety-plan): the only images `write` may send to MAIN. sha256 -> label.
 ACCEPTED_IMAGES = {
     '9470fa599734b8341cbfae37617702e7f17be8228e622f63a0b5ca5fc2f31a96':
@@ -151,8 +154,8 @@ def frame_i(tgt=MAIN_TARGET, field1=0, field2=0):
 
 def query_model(link, log, secs=I_ACK_SECS):
     """Send the 'I' target-information frame and read the fixed 54-byte reply. Returns the
-    16-bit model code (reply payload bytes 5-6, FUN_0041b290), or None on timeout / a reply
-    that is not a well-formed 'I' for MAIN. The 'I' reply is a fixed-length frame, not a
+    16-bit model code (reply frame bytes 5-6, FUN_0041b290), or None on timeout, a bad
+    checksum (vendor result 10, a failed reply), or a reply that is not an 'I' for MAIN. The 'I' reply is a fixed-length frame, not a
     D/P data frame, so it is read directly rather than through Link.read_frame."""
     link.send(frame_i())
     deadline = time.time() + secs
@@ -169,9 +172,11 @@ def query_model(link, log, secs=I_ACK_SECS):
     if f[1] != ord('I') or f[2] != MAIN_TARGET:
         log(f'< I reply: bad header {f[:3].hex(" ")}')
         return None
-    model = (f[7] << 8) | f[8]               # payload bytes 5-6 (frame offsets 7-8)
-    ckok = ck(f[:-1]) == f[-1]
-    log(f'< I reply: {I_REPLY_LEN} B, model {model:#06x}, ck {"ok" if ckok else "BAD"}')
+    if ck(f[:-1]) != f[-1]:
+        log(f'< I reply: bad checksum {f.hex(" ")}')
+        return None
+    model = int.from_bytes(f[I_MODEL_OFFSET:I_MODEL_OFFSET + 2], 'big')
+    log(f'< I reply: {I_REPLY_LEN} B, model {model:#06x} {f.hex(" ")}')
     return model
 
 

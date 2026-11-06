@@ -109,9 +109,11 @@ retry counts, `E` abort, all 1,008 frames sent). Three corrections made: the `L`
 (target information) step. The writer now matches the vendor order `C` → `I` → `L` → `P`:
 it sends `I` = `AA 49 01 00000000 00000000 F4` (FUN_0041d3f0), reads the 54-byte reply
 (FUN_0041b290), and aborts **before any erase** unless the model code at reply bytes 5-6
-equals 0x0011 (AVR-4306; checked by the vendor at FUN_00407C60 0x407d81). The exact
-endianness/placement of that field and whether the loader rejects `L` without a prior `I`
-are still unverified on the unit. Guards: image sha256 must be one of the two pinned files (the patch build
+equals 0x0011 (AVR-4306; checked by the vendor at FUN_00407C60 0x407d81). A reply with a
+bad checksum is rejected, as the vendor does. Where the vendor reads the field is settled
+at instruction level (big-endian frame bytes 5-6: FUN_0041b290 0x41b2d5-0x41b30a,
+FUN_004081c0 0x408235); a first implementation read bytes 7-8 and was fixed. What this
+unit actually sends in that field is unverified until the first session. Guards: image sha256 must be one of the two pinned files (the patch build
 or vendor 01.00 rollback) and exactly 0xFC000 B; `--confirm-write` is required and prints
 the safety-plan.md checklist until given; target is forced to 1; `L`/`P` builders refuse
 any other target; port 5001 is refused. `sim/fake_unit.py` grew the `L`/`P` write side
