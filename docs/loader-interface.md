@@ -211,8 +211,9 @@ addresses would also return flash; the working settings read is SSManage's sub 1
 
 ### 2.5 Update sequence (master loop `FUN_00406C50`, up to 20 images)
 
-Per enabled image: version check `FUN_00407190` (skip with "Pass update." when the
-package version string equals the version reported for that target) → target switch
+This is the **RS-232** loop (§2.8). Per enabled image: version check `FUN_00407190`
+(skip with "Pass update." when the package version string equals the version reported
+for that target; only if "Pass the update of the same version." is set) → target switch
 `FUN_00407350` if the processor changes → parameter backup (MAIN) → load image into a
 4 MB 0xFF-filled buffer and re-check its byte sum (`FUN_00409AE0`) → write: target 0x0B
 goes to the CPLD/VME player only for images named `CPLD`/`CPLDA`/`CPLDL`; all others
@@ -248,8 +249,9 @@ Data frame layout (decoder `FUN_0041E760`): `AA type tgt status len16 addr32 pay
 status 0 = only, 1 = first, 2 = middle, 3 = last. After each data frame the PC sends ACK
 `AA 'A' tgt ck` (`FUN_00419870`) or NACK `AA 'N' tgt ck` (`FUN_004198C0`).
 
-The UI has a **"Disable pass."** checkbox: it turns off the same-version skip, so a
-vendor image of the same version can be re-flashed (simplifies safety-plan Stage 2).
+~~The UI has a "Disable pass." checkbox: it turns off the same-version skip.~~
+Corrected in §2.8: "Disable pass." turns off the checks of the LAN loops only, and
+DM850W/DM850D are never checked.
 
 ### 2.7 Read-only client
 
@@ -266,6 +268,81 @@ power-cycled. Its frame builder refuses anything but C, S, A, N; it refuses port
 (`C` silent in normal mode, `S` range ignored, sub 0/1 areas); against it: normal-mode
 `check` NG, settings read and 1 MB application read byte-exact with every 7th data frame
 corrupted (NACK/retry). Used on the unit 2026-11-05 (lan-access.md).
+
+### 2.8 Updater control flow and what one run writes (decompiled 2026-11-06)
+
+Ghidra decompile plus disassembly checks of the 6.0.0.4 updater. Dialog control IDs
+were mapped to their labels from the dialog resource (dialog 102).
+
+**Start mode** (`FUN_00403560`):
+- With a command-line argument `/NN` the tool runs in **user mode**. It reads
+  `<exe dir>_NN\UpdateInformation_NN.txt` with the keys `IPAddress`, `Skip` and `Drive`
+  (`FUN_0040B170`, `FUN_0040B460`).
+- Without an argument it runs in **factory mode**: the title gets `<Factory Mode>`, and
+  dialog 102 shows every control.
+
+**Container flags** (`FUN_00404B90`; strings `MW:`, `BP:`, `PV:`, `ON` at 0x448B80,
+0x448B7C, 0x448B78, 0x4487C4):
+
+| Flag | When ON, it enables |
+|---|---|
+| `MW` | the All/Select radio (0x408/0x409) |
+| `BP` | "Backup the setting of the product." (0x417 → 0x18C) |
+| `PV` | "Pass the update of the same version." (0x41E → 0x190) |
+
+Every vendor container has MW:ON, BP:OFF, PV:OFF.
+
+**Per-image fields** (8-character columns of an image line):
+- `t` (column 0x48): load check and post-write step.
+- `m` (column 0x50) picks the loop that handles the image:
+  - bit 0: RS-232 loop;
+  - bit 1: LAN µcom loop;
+  - bit 2: LAN DM850 loop.
+- Byte 2 of `m` is the DM850 action: 1 bootloader, 2 image, 3 image + cne, 4 webpage.
+- Vendor values: MAIN/SUB/DSP m = 3; DM850I 0x00020005; DM850W and DM850D 0x00040004.
+
+**Update button** (`FUN_004044C0`):
+- **RS-232:** `FUN_004066B0` → loop `FUN_00406C50` (bit-0 images), one stage. It skips
+  same-version images only if "Pass the update…" is set, which needs PV:ON.
+- **LAN, stage 1:** `FUN_00407C60` runs on the package loaded at Check communication
+  (resource 320: `FUN_00405CB0` → `FUN_0040C850(0x140)`). It runs the µcom loop
+  `FUN_00408310` (bit 1), then the DM850 loop `FUN_004090A0` (bit 2, TCP 5001).
+- **LAN, stage 2:** if stage 1 succeeded (0x40452E), `FUN_0040C850(0x141)` loads
+  resource 321, re-selects its images and runs `FUN_00407C60` again, without repeating
+  `VI?`. **Nothing in the UI stops stage 2.**
+
+**Skip checks on LAN** (`FUN_00408890`, same code as `FUN_00407190`):
+- Plain string equality: the package version with the '.' removed is compared with the
+  `VI?` field. For DM850 the stamp is compared with `VI?` field 1 or field 2. Higher and
+  lower versions are both written.
+- **µcom loop:** checked only for images named MAIN, SUB or DSP, and only while
+  "Disable pass." (0x42B → 0x194) is clear (0x4083F1, esi = 0).
+- **DM850 loop:** checked only for DM850B and DM850I, under the same condition
+  (0x40924E, ebp = 0).
+- **DM850W and DM850D are never checked.** For each one present, every LAN run sends
+  `erase webpage` (`FUN_0041FEE0`) and `update webpage` (`FUN_0041FD90`).
+- User mode sets "Disable pass." (`FUN_0040B860`), so a user-mode run writes every image
+  in 320 and 321. "Pass the update…" (0x190) affects only the RS-232 loop and the
+  `VI?` requirement in `FUN_00408050`.
+
+**What one vendor LAN run writes** on a unit already at 6.0.0.4:
+
+| Mode | Stage 1 (resource 320) | Stage 2 (resource 321) |
+|---|---|---|
+| Factory mode, defaults | MAIN skipped; **DM850D** written (placeholder page) | SUB, DSP, DM850I skipped; **DM850W** written |
+| User mode | **MAIN, DM850D** | **SUB, DSP, DM850I, DM850W** |
+
+**MAIN write frames** (`FUN_00419260` → `FUN_0041A070`, `FUN_0041A7E0`):
+- **`L`:** `AA 4C 01 00 vh vl start32 end32 ck`. The version word comes from the header
+  ("01.00" → 0x0100). An ACK is expected within 10 s, with up to 3 retries.
+- **Data:** then `P` frames of 0x400 bytes (BE address, status 1/2/3, layout as in
+  §2.6).
+  - For target 1 every frame is sent, erased ones included. All-0xFF middle frames are
+    skipped only for targets 3/4/5/0x0B. MAIN takes 1,008 frames.
+  - ACK timeouts: first frame 60 s (the tool shows "Erasing…", so the erase happens on
+    the first data frame), middle frames 6 s, last frame 60 s. Each frame gets 3 retries.
+- **After the write:** MAIN on LAN gets a "Sum" check by default (radio 0x407,
+  `FUN_00408E40`). "Verify" (0x406) is the `S` read-back.
 
 ## 3. bCoD and AVTOOL3 (solved — see tools)
 
@@ -285,8 +362,9 @@ flash when handing over (§1.4a); the unit-side version for the skip comes from 
 (§2.6); the serial path speaks the same protocol and MAIN serves loader frames on UART1
 (§1.4a, 0xF008E4).
 
-1. How MAIN builds the `VI?` reply (identity string at 0xFFBE80 is the candidate), so a
-   patched build reports a new version and is not skipped.
+1. How MAIN builds the `VI?` reply (identity string at 0xFFBE80 is the candidate; it is
+   referenced from 0xF00360 and 0xF003F6, next to the loader-service calls). No longer
+   needed for delivery: the skip is equality only and can be bypassed (§2.8).
 2. Does Denon's loader erase only the `L` range, or all of blocks 3–20? Does it filter
    `S` ranges? What does it do with each mode value? (Answered by the blocks 0–2 read.)
 3. "Recovering DM800" (0x40661D → `FUN_004090A0`): how a dead DM850 is reached.

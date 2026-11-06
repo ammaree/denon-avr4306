@@ -72,21 +72,39 @@ Limits of the offline checks:
 4. Then the disassembly of the loader: Gate A (can it recover a broken application by
    itself?), the reset path, and the ID code (needed for the last-resort route).
 
-## 5. Open before any write (delivery)
+## 5. Delivery (analysed 2026-11-06; facts in loader-interface.md §2.8)
 
-- **How it gets to the unit.**
-  - The vendor updater's same-version skip compares the package version with `VI?`. A
-    patched MAIN must carry another version (01.01) to be written.
-  - "Disable pass." must **not** be used: it also re-writes SUB, DSP and DM850, which
-    breaks hard rule 1.
-  - Resource 320 holds MAIN + DM850D, and 321 holds SUB/DSP/DM850I/DM850W. Whether
-    DM850D/W would be re-written depends on how their stamps are compared; `VI?`
-    reports no W/D stamp.
-  - Options: decompile the skip logic (`FUN_00407190`); or use the FWCV tool, which
-    loads an external `.bin`, with a MAIN-only plain container; or our own writer
-    (`L`/`P` frames). That decision comes before anything else.
-- **Rollback:** vendor MAIN 01.00 with version 01.02 (or the FWCV container), a second
-  write. The other choice is to leave the inert patch in place.
-- **Remaining brick risk** is the write itself (power loss mid-write), the same as any
-  vendor update, plus Gate A, which is unknown until the dump. The patch adds no code to
-  boot or update paths.
+**The vendor updater cannot deliver MAIN alone over LAN:**
+- After a successful stage 1 it always runs stage 2 (resource 321), and stage 2 always
+  sends `erase webpage` + `update webpage` for DM850W. That breaks hard rule 2.
+- In user mode it also re-writes SUB, DSP and DM850I, which breaks hard rule 1.
+- "Disable pass." only switches the version checks off; it never narrows the image set.
+- A new version number is not needed: the check is plain string equality.
+- FWCV is the same engine (update-tools.md §2) with an older UI; not pursued.
+
+| Option | Needs | Writes | Open risk |
+|---|---|---|---|
+| A. Vendor updater as shipped | Windows | MAIN + DM850W (+ DM850D) | breaks rule 2: **rejected** |
+| B. Vendor updater in factory mode, with a MAIN-only container as resource 320 and a 1-byte x86 patch that skips stage 2 (0x404530 `74 6B` → `EB 6B`) | a Windows PC or VM (none set up; this Mac is arm64), and the patched exe | MAIN only | the x86 patch and the resource swap cannot be tested here |
+| C. Own writer, `loader_client.py write`: the vendor `L`/`P` sequence, retries and timeouts copied from §2.8, with the `S` sub-0 read-back as verify | macOS only; the fake unit extended with `L`/`P` | MAIN only. Frame whitelist C/S/L/P/A/N, target 1 only, no port 5001 | a transcription error in framing or timing, checked against the decompile and the fake |
+
+**Recommendation: C.**
+- It sends the same frames as the vendor tool.
+- It runs on the Mac, with the client that already worked on the unit.
+- It cannot send DM850 commands or reach SUB, DSP or the CPLDs.
+- The full 1,032,192-byte read-back proves the write.
+- Version word in `L`: 0x0100, as the vendor sends for this image. The identity string
+  at 0xFFBE80 stays "Ver01.00", and the patch is identified by its `DM` reply.
+
+**Rollback:** the same writer with vendor MAIN 01.00, which is byte-equal to the unit's
+flash today (lan-access.md). It costs one more write (2 of 10). The alternative is to
+leave the inert patch in place.
+
+**Remaining brick risk** is the same as for any vendor update. A power cut or link loss
+after the first data frame (when the erase starts) leaves MAIN without an application.
+Recovery then depends on the resident loader still answering `C`/`L`/`P` after
+power-up. That is Gate A, unknown until the dump.
+- The update agent at 0xF0070C lies inside the erased range.
+- Who answered `C`/`S` in update mode on 2026-11-05 is still open
+  (loader-interface.md §4 item 6).
+- The patch adds no code to the boot or update paths.
