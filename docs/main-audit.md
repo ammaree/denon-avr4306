@@ -191,6 +191,33 @@ the apply means a manual control-flow trace of that subsystem, which is a larger
 Either path is a focused follow-on. Neither blocks the §2 version bump, which stays the ready,
 independent content for the next MAIN write.
 
+### Checked against the complete codebase (2026-11-06)
+
+With the whole-program codebase built (docs/main-codebase.md), the apply was traced as far as
+static analysis allows, and it is **still not reachable by static data-xref**, for a concrete
+reason: the dimmer path is dynamic-dispatch and dynamic-pointer throughout.
+
+- `0x08A9` (the persistent level) has **zero** references even after whole-program constant
+  propagation — the settings block is reached through a runtime base pointer, not a constant,
+  so no instruction resolves to `0x08A9`.
+- `0x40A6` (the menu staging byte) resolves to ~47 reads across ~15 display builders
+  (`FUN_f1360c`, `FUN_f15b80`, `FUN_f1672a`, …) and **no** resolvable writer — the staging
+  write goes through a pointer too.
+- `0xF17F4E` (the dimmer builder) has **no** static caller: it is reached through the builder
+  table `0xF7E035` indexed at runtime, which static analysis does not fold.
+
+So the setter and the apply sit behind a runtime-indexed dispatch and runtime base pointers
+that neither value-scan nor whole-program constant propagation unfolds. Reaching the apply
+statically would mean hand-reading the menu/key control flow through those pointers — possible
+in the codebase now, but a decompilation-reading effort, not a query.
+
+**This makes key-injection the clear implementation** (option 2 above): enqueue the DIMMER key
+into the firmware's input queue and let the stock handler do the set + checksum + apply, so no
+apply address is needed. The tractable next trace is therefore the **key-input path** — the IR
+/ front-panel key ISR and the event queue it fills, plus the DIMMER key code — which is a
+concrete data structure (an ISR filling a ring), unlike the pointer-hidden menu internals. The
+on-unit `dmdump` patch can confirm the queue by watching it fill on a key press.
+
 **Implication for the enhancement:** the remote dimmer command is **not** a trivial poke — the
 level lives in the menu engine, reached through staging and an apply that are not yet pinned.
 The version bump (§2) is the sure, low-cost content for the p1 write; the dimmer command is a
