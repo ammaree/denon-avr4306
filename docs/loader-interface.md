@@ -6,14 +6,13 @@ Status 2026-11-05: in progress. Confidence is stated per item.
 
 ## 1. MAIN application ↔ resident blocks 0–2 (from MAIN 01.00; 00.76/00.99 same layout)
 
-### 1.1 Handover: loader → application (confirmed)
+### 1.1 Handover: loader → application
 
-- The application sets no stack or base registers: zero `ldc #imm,isp/sp/sb/fb`
-  encodings in the whole image. The resident loader sets them, then jumps to the
-  **entry pointer at 0xFFBE7C** (0xF0070C in 00.99/01.00; 0xF006F4 in 00.76).
-- The entry begins `fclr i` (interrupts off) and calls the init routines.
-- Correction (§1.4b): the code at this entry is MAIN's update agent, not the AV
-  application. How the loader starts the application is in blocks 0–2.
+Corrected from the block 0–2 dump (§5). Reset sets ISP = 0xC3FF and INTB = 0xFFBF00,
+then branches on the mode word. Mode 0x0C is the only case that jumps through the
+pointer at 0xFFBE7C (0xF0070C in 00.99/01.00). That pointer still addresses the update
+agent, not the AV application (§1.4b). Every other mode except 4 jumps to the fixed
+address 0xF00000.
 
 ### 1.2 Application header block 0xFFBE7C–0xFFBFFF (confirmed layout, meaning inferred)
 
@@ -30,9 +29,9 @@ The identity string carries the MAIN version. It is the likely source for the up
 change this string and the AVTOOL3 header version together** (to confirm in the tool).
 
 The 0xFFBF00 table differs from the application's own INTB table (§1.3): about 20
-handlers vs 8. Working hypothesis: the loader installs INTB = 0xFFBF00 (or relays through
-it) for normal running, and the application's 0xFFBD7C table is a reduced set used in
-its update path. **[verify from the block 0–2 dump]**
+handlers vs 8. Confirmed from the dump (§5): reset does `ldc #0xFFBF00,intb` before
+the mode branch. The agent's `ldc #0xFFBD7C,intb` at 0xF007B0 replaces it on the
+mode 0x0C path.
 
 ### 1.3 Application INTB table (confirmed)
 
@@ -393,20 +392,215 @@ flash when handing over (§1.4a); the unit-side version for the skip comes from 
 1. How MAIN builds the `VI?` reply (identity string at 0xFFBE80 is the candidate; it is
    referenced from 0xF00360 and 0xF003F6, next to the loader-service calls). No longer
    needed for delivery: the skip is equality only and can be bypassed (§2.8).
-2. Does Denon's loader erase only the `L` range, or all of blocks 3–20? Does it filter
-   `S` ranges? What does it do with each mode value? (Answered by the blocks 0–2 read.)
+2. Does Denon's loader erase only the `L` range, or all of blocks 3–20? Still open.
+   Mode values and the `S` dispatch are in §5: sub 0/1/2 are sent on without a range
+   test; sub 3 requires both ends in 0xF00000–0xFFFFFF.
 3. "Recovering DM800" (0x40661D → `FUN_004090A0`): how a dead DM850 is reached.
 4. Which control-protocol handler turns ASCII `RBUPDATE` into set_mode + jump (RB is not
    in the 0xF4B206 group; the five set_mode callers are listed in §1.4a).
 5. ~~Normal-mode `C` on 5000 unanswered on the live unit.~~ **Answered:** expected. The
    vendor sends `C` only after `RBUPDATE` (update) or after `VI?` has failed (check);
    §2.1. `loader_client.py read` now follows the vendor order.
-6. Who answers `C(1)` / `S(1, …)` in update mode: the update agent (§1.4b) ignores frames
-   for target 1 except `U`/`X`, so it is probably the loader in blocks 0–2. The first
-   session shows something answers both (`S` semantics in §2.4); which code does is
-   still open.
+6. ~~Who answers `C(1)` / `S(1, …)` in update mode.~~ **Answered (§5):** the mode-4
+   updater copied to RAM 0xA000. Its frame byte is `C`/`X`/`U`/`I`/`L`/`S`/`E`. The
+   update agent does not serve an `S` of MAIN flash. Which application path sets mode
+   4 for `RBUPDATE` is still item 4.
 7. ~~Whether the DM850 passes `VI?` on 5000 to MAIN in normal mode.~~ **Answered:** yes,
    same reply as on port 23 (live unit 2026-11-05 21:49, lan-access.md).
 
 Tooling: Ghidra 12.2 headless with a locally built macOS arm64 decompiler
 ([tools/ghidra/](../tools/ghidra/)); pe_xref.py for quick string/import lookups.
+`tools/ghidra/SeedLoader.java` is the pre-script that seeds the reset vector and the
+five services below before auto-analysis of `build/loader/MAIN_full.bin`.
+
+## 5. Resident loader, from the dump
+
+Read 2026-11-06 from the unit, twice, both sha256 `80ec3239…`
+(`dumps/dm-20261106-102403/main_FFC000_FFFFFF.bin`, git-ignored). Analysed as the top
+16 KB of `build/loader/MAIN_full.bin` (processor M16C/80:LE:16:default). Addresses
+below are instruction addresses in that image. objdump mis-decodes this block
+(firmware-package.md §8); the listing used here is Ghidra's.
+
+### 5.1 What reset does before the branch
+
+Reset vector 0xFFFFFC = 0xFFC000. `0xFFC000`:
+
+| Address | Effect |
+|---|---|
+| 0xFFC000 | `fclr i` |
+| 0xFFC002 | R3 = 0. This is the cold-boot marker. The warm entry plants a different value (§5.2). |
+| 0xFFC004 | PRCR bit 1, PM0 = 0x80, PM1 = 0, PRCR bit 1 off, PRCR bit 0, CM0 = 4, CM1 = 0x20, MCD = 0x12. Then TCSPR (0x035F): bit 7 cleared, then bits 0, 1, 2, 3 and 7 set. |
+| 0xFFC03C | ISP = 0xC3FF (top of RAM) |
+| 0xFFC041 | INTB = 0xFFBF00. This loads the header vector table. It does not read the table. |
+| 0xFFC046 | `cmp.w #0x4649, R3` / `jeq 0xFFC050`. Cold boot (R3 = 0) falls through. |
+| 0xFFC04C | `jsr.a 0xFFD6FA` — port-direction init (P0–P10 and the pull-up bytes). Not a mode input. |
+| 0xFFC050 | R0 = mode word at RAM 0x0400 |
+| 0xFFC055 | Same `cmp.w #0x4649, R3`. Cold boot falls through. |
+| 0xFFC05B | `jsr.a 0xFFD772`, and 0xFFC05F stores R0 back to 0x0400. |
+
+`0xFFD772` is the cold-boot mode source. It calls `0xFFD7C2`, which programs AD0CON2
+(0x0394) = 0x01, AD0CON1 (0x0397) = 0x38, AD0CON0 (0x0396) = 3, then 4, then 5, starts
+each conversion (ADST, bit 6) and waits for it to clear. 0x01 in AD0CON2 is
+sample-and-hold with the analog port left at AN_0–AN_7 (M32C/87 hardware manual,
+AD0CON2 bits APS1:APS0). Channel field 3/4/5 is AN_3/AN_4/AN_5, pins P10_3/P10_4/P10_5,
+the front-panel key ADCs (hardware.md). The 16-bit results are read from AD03/AD04/AD05
+(0x0386/0x0388/0x038A) and masked to 10 bits.
+
+Each sample becomes a code:
+
+| Code | 10-bit sample |
+|---|---|
+| 0 | 0x000–0x02A |
+| 1 | 0x02B–0x080 |
+| 2 | 0x081–0x0D4 |
+| 3 | 0x0D5–0x127 |
+| 4 | 0x128–0x17C |
+| 5 | 0x17D–0x1D5 |
+| 6 | 0x1D6–0x22B |
+| 7 | 0x22C–0x280 |
+| 8 | 0x281–0x2D6 |
+| 9 | 0x2D7–0x32B |
+| 10 | 0x32C–0x380 |
+| 11 | 0x381–0x3D5 |
+| 0xFF | 0x3D6–0x3FF |
+
+`0xFFD772` walks 5-byte records at 0xFFD8C1. Bytes 1–3 are the three codes; byte 4 is
+the mode it returns. A record whose byte 4 is 0 ends the walk and returns 0.
+
+| AN_3 | AN_4 | AN_5 | Mode stored at 0x0400 |
+|---|---|---|---|
+| 0x00 | 0x00 | 0xFF | 0x02 |
+| 0x06 | 0x08 | 0xFF | 0x0F |
+| 0x03 | 0x08 | 0xFF | 0x01 |
+| 0x03 | 0x06 | 0x03 | 0x03 |
+| 0x06 | 0x04 | 0xFF | 0x04 |
+| — | — | — | 0x00 (no match) |
+
+Nothing else is an input. The header bytes 0xFFBE7C–0xFFBFFF are not read. No digital
+port pin is sampled. CNVSS is not read. There is no timeout: the 12,000-iteration loop
+later on is the width of an output pulse.
+
+### 5.2 The branch, and the warm entry
+
+`0xFFC064` compares R0 with 0x0C, then with 4.
+
+| Mode | Where it goes |
+|---|---|
+| 0x0C | 0xFFC072. P13 (P1 bit 3) driven high, P86 (P8 bit 6, E_RESET) driven low for 12,000 loops of three `nop`s, then high. `jmp.a 0xFFC0BE`. |
+| 4 | Same pin pulse, then the same `jmp.a 0xFFC0BE`. 0xFFC06D writes 4 back to 0x0400 first. |
+| anything else | `jmp.a 0xF00000` at 0xFFC099. The mode word is left as it is. A `jmp.b` at 0xFFC09D loops on that jump if it were ever returned to. |
+
+`0xFFC0BE` splits the two loader modes:
+
+- Mode 4: `smovf.w` copies R3 = 0x0B0A words (0x1614 bytes), 0xFFC0E4–0xFFD6F7, to RAM
+  0xA000, then `jmp.a 0x00A000`. That image is the updater. It is entirely inside
+  block 2, which an application erase does not touch.
+- Mode 0x0C: `mov.l #0xFFBE7C, A0` / `jmpi.a [A0]`. The pointer on this unit is
+  0xF0070C, the update agent. The pointer is not tested.
+
+Warm entry `0xFFC09F` (every `jmp.a 0xFFC09F` from the application, and the updater's
+own exit at 0xFFC2B1): interrupts off, R0–R3 and A0/A1 cleared, SB = 0, FB = 0, then
+`mov.w #0x4649, R3` and `jmp.w 0xFFC004`. Both compares against 0x4649 are taken, so
+port init and `0xFFD772` are skipped and the RAM mode word stands. 0x4649 is the
+marker; its bytes are `49 46`.
+
+`0xFFC0BC` is `reit`, the target of every fixed vector except reset.
+
+### 5.3 No check of the application before the jump
+
+There is no checksum, marker test, or entry-pointer test on the way to 0xF00000 or
+through 0xFFBE7C. A failed check has no path, because the check is not there.
+
+The mode-4 updater does check the window of an `L` (0xFFC3CE) and of an `S` whose
+sub is 3 (0xFFC54A). For `L`, sub 0 requires both ends in 0xF00000–0xFFFFFF, sub 1 in
+0x0400–0xC3FF, and sub 2 in 0x0402–0x2701. `S` sub 3 requires both ends in
+0xF00000–0xFFFFFF. A window outside its test, or any other `L` sub, sets the step
+byte 0x2D67 to 2, and 0xFFC599 sends `N` (0x4E). It stays in the updater. That is a
+request check, not a check of the image already in flash. The `I` reply at 0xFFC634
+reads the identity string at 0xFFBE80 and packs ASCII hex through `0xFFC742`; it does
+not compare a sum.
+
+`S` dispatch at 0xFFC495: sub 0/1/2 go to states 6/7/8 with no range test. Sub 3 is
+the test above. That is why the 2026-11-05 `S` with sub 0 and RAM addresses still
+streamed the application (lan-access.md).
+
+### 5.4 Entering the updater with no application running
+
+Cold reset always starts at 0xFFC000. It overwrites 0x0400 from the key table before
+it branches, so leftover RAM does not matter and the application is not running yet.
+
+The only cold-boot result that enters the updater is the row AN_3 = 6, AN_4 = 4,
+AN_5 = 0xFF, which stores mode 4. On a 10-bit scale that is 0x1D6–0x22B on P10_3,
+0x128–0x17C on P10_4, and 0x3D6–0x3FF on P10_5 (the idle end of that ladder). The
+button names are not in this dump.
+
+There is no timeout, and no single strap, that selects mode 4. A blank application
+with any other key state takes `jmp.a 0xF00000`. Erased flash there is `und`, whose
+vector is 0xFFC0BC (`reit`). That does not re-enter the updater.
+
+Mode 0xC is not in the cold-boot table. It happens only when the warm entry finds it
+already in RAM, and it then depends on the header pointer.
+
+### 5.5 What each mode value in §1.4a and §1.4b does
+
+At 0xFFC064 the loader itself distinguishes three cases. Everything §1.4a plants in
+0x0400 before `jmp.a 0xFFC09F` lands in one of them:
+
+| Value | Set by (§1.4a / §1.4b) | Loader |
+|---|---|---|
+| 4 | frame byte 1; also the cold-boot chord in §5.4 | Updater in RAM (§5.2). |
+| 0x0C | frame byte 10. The agent's "DM850 relay" mode (§1.4b). | Jump through 0xFFBE7C into the agent. |
+| 5 | frame byte 2 | `jmp.a 0xF00000`, value kept. |
+| 6 | frame byte 3 | same |
+| 7 | frame byte 4 | same |
+| 8 | frame byte 5 | same |
+| 9 | frame byte 7 on the DM850-link path | same |
+| 0x0A | frame byte 6 on that path | same |
+| 0x0B | frame byte 8 | same |
+| 0x0D | frame byte 11 | same |
+| 0x0E | frame byte 9 | same |
+| 0x18, 0x19, 0x1A | not planted by the loader; the application acts on them at 0xF4C326 | If one of these is already in RAM at the warm entry, the loader still jumps to 0xF00000. |
+
+The updater's own `X` exit (0xFFC285) writes a mode and jumps to 0xFFC09F: sub 2 → 5,
+sub 3 → 6, sub 0x0A → 0x0C, sub 0x0B → 0x0D. Any other sub leaves the mode word
+unchanged and still jumps.
+
+`0xF00000`, where every non-4 non-0x0C value arrives:
+
+1. Mode 0x1B is rewritten to 1 (0xF00004).
+2. `0xF04190` stores a flag. Mode 0 is then replaced by `0xF04048` (0xF00020), a
+   second copy of the same ADC walk, table at 0xF7D504: (6,4,FF)→0x14, (1,1,FF)→0x18,
+   (1,3,FF)→0x19, (1,2,FF)→0x1A, (2,3,FF)→1, else 0. On a cold reset the loader has
+   already consumed (6,4,FF) as mode 4, so the application's 0x14 row runs only when
+   mode 0 was left in RAM and that chord is held.
+3. `0xF4C326`. Modes 1 and 2, and the flag byte 0x54F1 when it is 1, call
+   `0xF01D24`. Modes 0x18/0x19/0x1A clear the low two bits of 0x08E3; 0x18 then
+   clears the whole byte and 0x19 sets bit 0. All three then `set_mode(0)`.
+4. After the init calls and `fset i`, a jump table at 0xF00097 (index = mode − 3,
+   clamped to 6 when the index is not 0..11). Each arm returns to 0xF00083 and reads
+   the mode again.
+
+| Modes that reach the table | Arm |
+|---|---|
+| 3 | 0xF000ED |
+| 5, 6, 7, 8, 0x0D, 0x0E | 0xF000B9. Toggles bit 0 of 0x547B, then five calls. |
+| 0x0B | 0xF000D7. Same toggle, three calls. |
+| 0, 1, 2, 9, 0x0A, and every mode ≥ 0x0F (the clamp) | 0xF00103, the long call list. 0x18/0x19/0x1A arrive here as 0, after step 3. |
+| 4, 0x0C | 0xF000AF, but the loader does not send these to 0xF00000. |
+
+`jsr.a 0xFFD544` (the application's call at 0xF00895) is not the boot branch. It maps
+the mode word onto the byte at 0x2D68: 4→1, 5→2, 6→3, 7→4, 8→5, 9→7, 0x0A→6, 0x0B→8,
+0x0C→0x0A, 0x0D→0x0B, 0x0E→9. Mode 0x0F and anything outside 4..0x0E leave 0. The
+byte is what the agent puts in an ack frame (0xF011F4) and what it compares against a
+received frame (0xF01330, 0xF014C8).
+
+### 5.6 ID code
+
+The seven ID bytes are the bytes at 0xFFFFDF, 0xFFFFE3, 0xFFFFEB, 0xFFFFEF, 0xFFFFF3,
+0xFFFFF7, 0xFFFFFB. On this unit each one is 0xFF.
+
+The reset vector is 0xFFC000, stored `00 C0 FF FF` at 0xFFFFFC, so it is not the erased
+value that skips the serial programmer's ID check. Every other fixed vector is
+0xFFC0BC (`reit`), except the word at 0xFFFFE4 is stored `BC C0 FF 00`: its top byte,
+0xFFFFE7, is 0x00. That address is not one of the seven ID bytes. The 24-bit target is
+still 0xFFC0BC.

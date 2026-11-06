@@ -88,6 +88,14 @@ After:
 itself, functional MAIN changes carry real brick risk and the options go back to the
 user.
 
+**Gate A verdict (2026-11-06, loader-interface.md §5):** the resident updater can
+reprogram a blank application without opening the unit, but only when power-on finds
+the key chord that stores mode 4 (AN_3 code 6, AN_4 code 4, AN_5 at 0x3D6–0x3FF). It
+does not do that unattended. Any other cold-boot key state jumps to 0xF00000 with no
+checksum and no entry-pointer test, and a blank application there does not come back
+to the updater. Mode 0x0C still needs the header pointer at 0xFFBE7C. The decision on
+further MAIN writes stays with the user.
+
 The MAIN writer for Stage 3 (Option C, main-dump-patch.md §5) is `tools/loader_client.py
 write`: MAIN target 1 only, the vendor `C`→`I`→`L`→`P` sequence with a full read-back
 verify, gated by a two-image sha256 whitelist and `--confirm-write` (which prints this
