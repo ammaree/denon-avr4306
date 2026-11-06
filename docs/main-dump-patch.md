@@ -1,6 +1,7 @@
 # MAIN read-only dump patch ("DM" query)
 
-Status 2026-11-05: built and passing in the simulator. **Not on the unit.** Purpose:
+Status 2026-11-06: **written to the unit and working** (lan-access.md, first MAIN write);
+blocks 0–2 dumped. The write reset the settings to defaults. Purpose:
 read MAIN blocks 0–2 (0xFFC000–0xFFFFFF, Denon's resident loader, the reset vector and
 the ID code), which the loader's own `S` read does not return (lan-access.md, first
 update-mode session). Cost: 1 MAIN write (safety-plan rule 5).

@@ -206,3 +206,39 @@ Results:
   and end are not used. Other sub values were not tried (meaning unknown).
 - Update-mode entry and exit by power cycle left the unit working; settings were not
   reset.
+
+## First MAIN write: DM-dump patch (2026-11-06 09:57–10:24)
+
+User decisions: house LAN as is (wired `en11`, Wi-Fi up; deviation from safety-plan rule
+7, logged), UPS in place, settings backup copied off the Mac, home-automation controller
+off. Run with `/usr/bin/python3` (3.9.6): the Homebrew Python got `No route to host` on
+TCP to the unit while ping and `nc` worked (macOS Local Network permission, most likely).
+Writer test suite passed under 3.9 first.
+
+| Time | Step | Result |
+|---|---|---|
+| 09:57:28 | `VI?` | `01:0100`, unchanged |
+| | user power-cycles the unit; ping, ports 5000/23, `VI?` | all fine |
+| 10:01:21 | `write`: `VI?`, `RBUPDATE` → `RBSTART`, 15 s, `C(1)` | first try |
+| 10:01:41.801 | `I(1, 0, 0)` | 54-byte reply, model code **0x0011 at bytes 5–6**, as decompiled |
+| 10:01:41.808 | `L(1, 0, 0x0100, 0xF00000, 0xFFBFFF)` | ACK in 6 ms |
+| 10:01:52.760 | first `P` | ACK after **11.0 s** (the erase) |
+| 10:03:48.521 | last of 1,008 `P` | all ACKed first try, **no retries**; ~115 ms per frame |
+| 10:05:30 | 5 s, then `S` sub 0 read-back | 1,032,192 B, sha256 `9470fa59…` = the patched image |
+| | user power-cycles the unit | starts normally |
+| 10:23 | `VI?` | `01:0100` (identity string unchanged, as intended) |
+| 10:23:39 | `dmdump 0xF00000:0xF003FF` | equals the image: **patch works on the unit** |
+| 10:24:03, 10:24:12 | `dmdump` (default 0xFFC000–0xFFFFFF), twice | 16,384 B each, both sha256 `80ec3239…` |
+
+Results:
+
+- **Write path proven:** `C` → `I` → `L` → 1,008 × `P` → `S` read-back, no retries.
+- **Settings reset by the write:** after the power cycle the unit came up on factory
+  defaults (TUNER, 87.5 MHz, presets gone, no sound from the untuned tuner). Display,
+  controls and network are normal. The 2026-11-05 read-only session did not reset
+  settings, so the reset comes from the write itself, as the vendor manual says for
+  updates. Restore source: `dumps/loader-20261105-220209/settings_040C_2701.bin`.
+- **Blocks 0–2 acquired:** `dumps/dm-20261106-102403/main_FFC000_FFFFFF.bin`
+  (git-ignored). Reset vector → 0xFFC000; 0xFFC0BC is `reit` (the default handler the
+  application uses); 0xFFC742 starts with `enter`. Block 2 holds 6,192 non-erased bytes,
+  block 1 none, block 0 25 (fixed vectors, ID code). 62 % erased.
