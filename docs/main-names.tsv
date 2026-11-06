@@ -1,0 +1,57 @@
+# MAIN annotation map — applied to the Ghidra project by tools/ghidra/ApplyNames.java.
+# Columns: hexaddr <tab> name <tab> purpose. Flash addresses only (0xF00000-0xFFFFFF);
+# RAM variables are documented in docs/main-codeflow.md. Grows each RE iteration.
+# Confidence: entries here are verified in the disassembly or recorded in the docs
+# (control-protocol.md, main-audit.md, main-dump-patch.md, loader-interface.md).
+
+# --- entry / boot block ---
+FFC000	boot_reset_entry	M32C reset-vector target; resident loader / cold-boot startup (boot block)
+FFC0BC	loader_default_handler	Fixed-vector default handler (reit); unused interrupts land here
+FFC742	loader_hex_nibble	Boot-block routine: convert one ASCII hex digit to its value; used by the VI version parser
+F00000	app_cold_boot_entry	Application cold-boot entry; the boot-block startup jumps here on a normal boot
+
+# --- version / identity (VI?) ---
+F00360	vi_pack_main_version	Parse "Ver01.00" in the identity block into the VI? MAIN version bytes
+F003F6	vi_pack_identity	Parse the AVR4306M / Ver fields of the identity block for VI?
+FFBE80	identity_block	Identity string; MAIN "Ver01.00" at 0xFFBEB0 is the VI? MAIN-version source
+FFBF00	app_vector_table	Application interrupt vector table (64 entries)
+FFBD7C	agent_intb_table	Update-agent INTB vector table
+FFBE7C	agent_entry_ptr	Update-agent entry pointer
+
+# --- serial control protocol (UART1 rear RS-232 / UART0 DM850 link) ---
+F4BA26	uart1_rx_assemble	UART1 (rear RS-232) RX byte -> line buffer 0x4A45; index 0x5277 saturates at 0x86 (bounded)
+F4BBF2	uart0_rx_assemble	UART0 (DM850 link) RX byte -> line buffer 0x528E; index 0x5317 saturates at 0x86 (bounded)
+F45EEC	cmd_per_line_step	Per received line: dispatch -> process -> build reply; then clears the line buffer
+F4B1C0	cmd_process	Command processor (DM-dump patch hooks here); id in r0, 0x113 = no reply
+F4B42E	cmd_token_dispatch	Scan token table 0xF87C3E; return the command id for a 2-char token (0 = unknown)
+F46172	cmd_build_response	Build the response line for a processed command
+F45F48	cmd_group_proc_a	Command-group sub-processor (calls cmd_process)
+F461A2	cmd_group_proc_b	Command-group sub-processor (+ arg helper 0xF4B8FC)
+F4B8FC	cmd_arg_value	Shared argument/value parse helper
+F87C3E	tok_table	Command token table: {char token[2]; u8 zero; u8 id}, ~34 entries
+F87BE2	id_to_internal	id -> internal command-number table (word entries)
+F84E10	response_strings	Query response strings (id-prefixed, null-terminated)
+
+# --- command handlers ---
+F02332	handle_PW	Power (PW) command handler; drives power/zone state 0x320B/0x320C/0x320F
+F0227A	pw_sub_a	PW sub-handler (power control)
+F03FC8	pw_sub_b	PW sub-handler (power control)
+
+# --- front-panel setup menu / display ---
+F1B270	disp_copy	Copy N bytes into the display line buffer (memcpy-like)
+F17F30	menu_line_build_a	Setup-menu line builder (tests staged value 0x40A6 == 0x11)
+F17F4E	menu_line_build_dimmer	DIMMER menu line builder; staged value 0x40A6 (0..3) indexes strings at 0xF80872
+F17F92	menu_line_build_b	Setup-menu line builder
+F17FD6	menu_line_build_c	Setup-menu line builder
+F1360C	menu_value_bits	Decode the staged menu value (0x40A6/0x40A7 bitfield) into display state
+F15B80	menu_group_build	Setup-menu group display builder (reads staged 0x40A6)
+F1672A	menu_group_build2	Setup-menu group display builder (reads staged 0x40A6)
+F16A50	menu_group_build3	Setup-menu group display builder
+F80872	dimmer_strings	"DIMMER:  3/2/1/0" level strings (16 bytes each; index = level)
+F7E035	menu_builder_table	Setup-menu display-builder pointer table (dimmer at index 2 = 0xF17F4E)
+F87AB0	osd_string_table	OSD/display string table (fixed-width, id-prefixed)
+
+# --- update agent (separate from the AV app; see loader-interface.md) ---
+F01704	agent_uart1_rx_isr	Update-agent UART1 RX ISR (not the AV app); RX ring 0x31A0/0x3196
+F01242	agent_rx_dequeue	Update-agent RX ring dequeue
+F007DD	agent_uart1_init	Update-agent UART1 init (U1MR/U1C0/U1BRG/U1C1)
