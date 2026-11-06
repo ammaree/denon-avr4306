@@ -137,19 +137,34 @@ Tracing `0x40A6` further **corrected the earlier read**. `0x40A6` is the setup m
 So `0x40A6` is **not** a byte a command can poke to set brightness; it only reflects the
 on-screen value while the dimmer item is open.
 
-### How to pin the two remaining facts — empirically, read-only (recommended)
+### Persistent dimmer byte: MAIN RAM 0x08A9 (pinned on the unit, 2026-11-06)
 
-Static value-scan has gone as far as it reliably can. The persistent level and the apply are
-cleanest to pin on the unit, read-only, no flash:
+Pinned empirically, read-only (the proven update-mode `settings-save` session, no flash): two
+`0x040C–0x2701` captures with only the front-panel dimmer changed between them
+(`dumps/dim-bright.bin` sha `fa20a9f4…`, `dumps/dim-dark.bin` sha `e3b4500a…`). Exactly three
+bytes differed:
 
-1. **Persistent dimmer byte** — on the unit: set the dimmer to a known level on the front
-   panel, run `loader_client.py settings-save`; change the level; save again; **diff** the two
-   `0x040C–0x2701` captures. The byte that tracks the level is the persistent offset. This is
-   the same read-only update-mode session already proven (lan-access.md), costs no flash cycle.
-2. **VFD apply** — either continue the static trace from the System Setup engine / the
-   front-panel DIMMER key handler to the function that writes the display controller, or
-   observe it dynamically once the persistent byte is known (watch what the firmware touches
-   when the level changes). The apply is what a remote command must call after setting the byte.
+| RAM | brightest | darkest/off | meaning |
+|---|---|---|---|
+| **`0x08A9`** | `0x03` | `0x00` | **the dimmer level** (3 = brightest … 0 = off) |
+| `0x18FF` | `0x5B` (91) | `0x58` (88) | checksum, tracked the −3 |
+| `0x2701` | `0x7C` (124) | `0x79` (121) | block checksum (last byte of the range), tracked the −3 |
+
+So the persistent level is **`0x08A9`**, value = the displayed digit (`3` bright … `0` off),
+which also explains the inversion in §3: the menu getter stages `0x40A6 = 3 − [0x08A9]` to
+index the `DIMMER:N` strings. The two checksum bytes (`0x18FF`, `0x2701`) move with it, so any
+writer of `0x08A9` must keep them consistent — the firmware's own setter does this, and
+`settings-restore` writes whatever checksums are in the image, so going through the firmware
+setter (not a raw poke) is the safe path.
+
+### Still open: the VFD apply
+
+The one remaining piece is the **apply** — the function the menu's confirm/front-panel DIMMER
+path calls to push the new brightness to the VFD live (setting `0x08A9` alone changes the
+stored value, not the panel until applied). Pin it by tracing the DIMMER key handler to the
+display-controller write, or by watching what the firmware touches when the level changes.
+A remote dimmer command then: set `0x08A9` (via the firmware setter, so checksums stay right)
+and call the apply.
 
 **Implication for the enhancement:** the remote dimmer command is **not** a trivial poke — the
 level lives in the menu engine, reached through staging and an apply that are not yet pinned.
