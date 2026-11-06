@@ -19,11 +19,13 @@ TCP 5001 is the DM850 bootloader channel; this tool refuses it.
   A / N   = AA 'A'|'N' tgt ck                   ACK / NACK from the PC after each data frame
 
 SAFETY (docs/safety-plan.md): the read-only frame builder `frame()` can only produce C, S,
-A and N frames. I (target info), L (load/erase) and P (data) are built only by `write`
-(frame_i/frame_l/frame_p), which this module exposes as a separate, explicitly gated
-MAIN-only command (Option C, docs/main-dump-patch.md §5). I is read-only (it reports the
-model code, checked before any erase); nothing here sends DM850 loader commands, RBNORM,
-or any state-changing control command, and every builder forces target 1 (MAIN). `S`/`L`/`P` are
+A and N frames. I (target info), L (load/erase) and P (data) are built by `write`
+(frame_i/frame_l/frame_p), the explicitly gated MAIN firmware command (Option C,
+docs/main-dump-patch.md §5). Settings restore builds L and D (`frame_l` / `frame_d`);
+D is the RAM-load data frame, and P is the flash-load data frame. I is read-only (it reports the
+model code, checked before any erase). Nothing here sends DM850 loader commands.
+`settings-save` and `settings-restore` send `RBNORM` on the way out of update mode; the
+other commands do not. Every builder forces target 1 (MAIN). `S`/`L`/`P`/`D` are
 sent only after the unit has answered RBUPDATE with RBSTART. Port 5001 (the DM850
 bootloader channel) is refused. Every connection is opened one at a time, with a delay,
 because the DM850 hangs under fast connection churn (docs/lan-access.md).
@@ -45,7 +47,7 @@ Commands:
                                                  exit X(1,2,1)+RBNORM. Read-only to flash.
   loader_client.py settings-restore --ip IP --image F --confirm-restore
                                                  SSManage load: update mode, I model guard,
-                                                 L sub 1 + P of the 8,950-byte settings body
+                                                 L sub 1 + D of the 8,950-byte settings body
                                                  to RAM 0x040C-0x2701, exit X+RBNORM. Writes
                                                  parameter RAM, not flash; no MAIN wear.
   loader_client.py verify --ip IP --against F [--source flash|dm]
@@ -122,7 +124,8 @@ ACCEPTED_IMAGES = {
 SETTINGS_START, SETTINGS_END = 0x040C, 0x2701    # the .bid body range in MAIN RAM
 SETTINGS_SIZE = SETTINGS_END - SETTINGS_START + 1  # 0x22F6 = 8,950 B
 RAM_START, RAM_END = 0x0400, 0xC3FF              # what a sub-1 S read streams (range ignored)
-SETTINGS_ACK_SECS = 10.0                         # P ACK for the small RAM write (no erase)
+SETTINGS_ACK_SECS = 5.0                          # L and D ACK: FUN_00403ed0(target, 5) = 5*100*10 ms
+EXIT_WAIT = 5.0                                   # FUN_00402db0(5): five Sleep(1000) around X/RBNORM
 DM_BLOCKS_RANGE = (0xFFC000, 0xFFFFFF)           # resident blocks 0-2 (DM-patch dump range)
 
 
@@ -167,12 +170,26 @@ def frame_l(start, end, version=MAIN_VERSION, sub=0, tgt=MAIN_TARGET):
 
 
 def frame_p(status, addr, payload, tgt=MAIN_TARGET):
-    """AA 50 01 status len16 addr32 payload ck. FUN_0041a7e0. MAIN only."""
+    """AA 50 01 status len16 addr32 payload ck. FUN_0041a7e0. MAIN flash only.
+    The resident loader accepts 'P' in a sub-0 flash load and rejects it in a sub-1 RAM load."""
     if tgt != MAIN_TARGET:
         raise ValueError('refused: write frames are MAIN (target 1) only')
     if len(payload) > P_CHUNK:
         raise ValueError('refused: P payload over 0x400 for MAIN')
     f = (b'\xAA' + b'P' + bytes([tgt, status]) + len(payload).to_bytes(2, 'big')
+         + addr.to_bytes(4, 'big') + bytes(payload))
+    return f + bytes([ck(f)])
+
+
+def frame_d(status, addr, payload, tgt=MAIN_TARGET):
+    """AA 44 01 status len16 addr32 payload ck. FUN_00403c50 (byte 0x361 = 0x44).
+    Settings RAM only. The resident loader accepts 'D' in a sub-1 RAM load (0xFFCCC4)
+    and rejects 'P' there."""
+    if tgt != MAIN_TARGET:
+        raise ValueError('refused: write frames are MAIN (target 1) only')
+    if len(payload) > P_CHUNK:
+        raise ValueError('refused: D payload over 0x400 for MAIN')
+    f = (b'\xAA' + b'D' + bytes([tgt, status]) + len(payload).to_bytes(2, 'big')
          + addr.to_bytes(4, 'big') + bytes(payload))
     return f + bytes([ck(f)])
 
@@ -188,8 +205,9 @@ def frame_i(tgt=MAIN_TARGET, field1=0, field2=0):
 
 
 def frame_x_normal(tgt=MAIN_TARGET):
-    """AA 58 01 02 01 ck: SSManage 'Reboot(Normal mode)' mode frame, X(1,2,1) (FUN_00401F40,
-    update-tools.md §3a). A mode change only — no flash write. MAIN only."""
+    """AA 58 01 02 01 ck: SSManage 'Reboot(Normal mode)' mode frame, X(1,2,1)
+    (FUN_00403520, called from FUN_00401F40). The loader ACKs sub 2 (0xFFC26A), then
+    stores mode 5. A mode change only — no flash write. MAIN only."""
     if tgt != MAIN_TARGET:
         raise ValueError('refused: X frame is MAIN (target 1) only')
     f = b'\xAA' + b'X' + bytes([tgt, 0x02, 0x01])
@@ -673,22 +691,25 @@ class Session:
 
 
 def exit_normal(a, log):
-    """SSManage 'Reboot(Normal mode)' (FUN_00401F40, update-tools.md §3a): X(1,2,1) on the
-    loader port (no reply; the vendor just waits), then RBNORM -> RBSTART on the control
-    port. Returns True if RBSTART was seen. No flash write."""
+    """SSManage 'Reboot(Normal mode)' (FUN_00401F40): one connection, wait 5 s, X(1,2,1)
+    and require its ACK (FUN_00403520, 5 s, 3 retries), wait 5 s, RBNORM\r -> RBSTART
+    (FUN_00404b40), wait 5 s. Returns True if RBSTART was seen. No flash write."""
+    wait = max(EXIT_WAIT, a.delay)
+    time.sleep(wait)
     l = Link(a.ip, a.loader_port, log)
     try:
-        l.send(frame_x_normal())
+        if not send_with_retry(l, frame_x_normal(), EXIT_WAIT, log, 'X(1,2,1)'):
+            sev('exit-normal', rbstart=False, x_ack=False)
+            return False
+        print('X(1,2,1) acknowledged.')
+        time.sleep(wait)
+        l.send(b'RBNORM\r')
+        ok, _ = l.wait_text(b'RBSTART', EXIT_WAIT)
+        if ok:
+            time.sleep(wait)
     finally:
         l.close()
-    time.sleep(a.delay)
-    t = Link(a.ip, a.control_port, log)
-    try:
-        t.send(b'RBNORM\r')
-        ok, _ = t.wait_text(b'RBSTART', 5.0)
-    finally:
-        t.close()
-    sev('exit-normal', rbstart=ok)
+    sev('exit-normal', rbstart=ok, x_ack=True)
     return ok
 
 
@@ -701,7 +722,6 @@ def finish_session_mode(a, log):
         sev('exit-power-cycle')
         return True
     print('\nexiting update mode: X(1,2,1) + RBNORM (SSManage Reboot(Normal mode))...')
-    time.sleep(a.delay)
     ok = exit_normal(a, log)
     print('RBNORM confirmed (RBSTART); unit back in normal mode.' if ok else
           'RBNORM not confirmed — power-cycle the unit to be sure it is back to normal.')
@@ -796,8 +816,10 @@ def cmd_settings_save(a, log):
 
 def cmd_settings_restore(a, log):
     """SSManage load (update-tools.md §3a, FUN_00402370 -> FUN_00403280): update mode, C, I
-    (model guard), L sub 1 for 0x040C-0x2701, P frames of the 8,950-byte settings body, then
-    the X(1,2,1)+RBNORM exit. Writes MAIN parameter RAM, not flash: no MAIN wear."""
+    (model guard), L sub 1 for 0x040C-0x2701 (FUN_004038f0; the range is the ushorts
+    FUN_00402610 reads at body offsets 2 and 4, which are 0x040C and 0x2701), D frames of
+    the 8,950-byte body (FUN_00403c50, type 0x44, 0x400-byte chunks, 5 s ACK), then the
+    X(1,2,1)+RBNORM exit. Writes MAIN parameter RAM, not flash: no MAIN wear."""
     if not a.image:
         sys.exit('refused: settings-restore needs --image (an 8,950-byte RAM settings file, '
                  'e.g. a settings-save output or a .bid body).')
@@ -827,20 +849,21 @@ def cmd_settings_restore(a, log):
                      '(AVR-4306). Settings not restored.')
         print(f'unit model code {model:#06x} confirmed (AVR-4306).')
         # L for the RAM settings range: sub 1, version 0 (FUN_00403280 -> FUN_004038f0).
+        # ACK timeout is SSManage's 5 s, not the updater's 6 s L timeout.
         if not send_with_retry(l, frame_l(SETTINGS_START, SETTINGS_END, version=0, sub=1),
-                               L_ACK_SECS, log, 'L(settings)'):
+                               SETTINGS_ACK_SECS, log, 'L(settings)'):
             sys.exit('L not acknowledged; settings not restored.')
         for i in range(nframes):
             off = i * P_CHUNK
             payload = body[off:off + P_CHUNK]
             status = 1 if i == 0 else 3 if i == nframes - 1 else 2
             addr = SETTINGS_START + off
-            if not send_with_retry(l, frame_p(status, addr, payload), SETTINGS_ACK_SECS, log,
-                                   f'P[{i + 1}/{nframes}] {addr:#06x}'):
+            if not send_with_retry(l, frame_d(status, addr, payload), SETTINGS_ACK_SECS, log,
+                                   f'D[{i + 1}/{nframes}] {addr:#06x}'):
                 sys.exit(f'settings restore failed at frame {i + 1}/{nframes}. The parameter '
                          'RAM is partly written; power-cycle the unit to clear it, then '
                          'retry (no flash was touched).')
-        print(f'settings written: {nframes} P frames to RAM '
+        print(f'settings written: {nframes} D frames to RAM '
               f'{SETTINGS_START:#06x}-{SETTINGS_END:#06x}.')
     finally:
         l.close()

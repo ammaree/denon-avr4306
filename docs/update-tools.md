@@ -118,7 +118,7 @@ over one TCP connection (socket/htons/connect/send/recv only). `original_AVR-430
    data frames with ACK/NACK; the file is `%4s%2s%4s` (model, region, version) + RAM
    0x040C–0x2701 (8,950 B).
 5. "Reboot(Normal mode)" (`FUN_00401F40`): reconnect, wait 5 s, `X` frame
-   `AA 'X' 01 02 01 ck`, wait 5 s, `RBNORM\r` → `RBSTART`, wait 5 s, close.
+   `AA 'X' 01 02 01 ck` and wait for its ACK, wait 5 s, `RBNORM\r` → `RBSTART`, wait 5 s, close.
 
 So the vendor's own settings backup is an update-mode session: there is no normal-mode
 path to the settings. `tools/loader_client.py read` does steps 1–4 without `SYMO`
@@ -129,17 +129,24 @@ in the frame is ignored (lan-access.md, 2026-11-05).
 **Load (restore) flow, decompiled 2026-11-06 (`ssml.c` `FUN_00401B40`).** The load-mode
 state machine is: "Reboot(Load mode)" (same `RBUPDATE`→`RBSTART` entry) → `C` → target
 information → `FUN_00402370`, which reads the `.bid` file, checks its model/region/version
-against the unit (`FUN_00402720`), and writes the body with `FUN_00403280`:
-`FUN_004038F0(1, 1, 0, 0x040C, 0x2701)` = an `L` with **sub-byte 1** (RAM) for the settings
-range, then `FUN_00403C50` streams the 0x22F6-byte body as `P` frames → "Reboot(Normal
-mode)" = `X(1,2,1)` + `RBNORM`. So restore is the same `L`/`P` path as a firmware write but
-with sub 1 and a RAM range — **it writes parameter RAM, not flash**.
+against the unit (`FUN_00402720`), and writes the body with `FUN_00403280`, which calls
+`FUN_004038F0(1, 1, 0, start, end)` then `FUN_00403C50`. The start
+and end are the big-endian ushorts `FUN_00402610` reads at offsets 2 and 4 of the 8,950-byte
+body (in the unit's settings image, `04 0C` and `27 01`). `FUN_004038F0` sends
+`AA 'L' 01 01 00 00` + those two addresses + checksum (15 bytes) and waits 5 s for the ACK
+(`FUN_00403ED0(target, 5)` = 500 × 10 ms), with 3 retries. `FUN_00403C50` streams the body
+as **`D` frames** (`AA 44`, not `P`): status 1 / 2 / 3, 0x400-byte chunks for target 1,
+address stepping from the start, same 5 s ACK. The resident loader's RAM-load state
+accepts `D` and rejects `P` (`0xFFCCC4`); its flash-load state is the opposite (`0xFFCAA8`).
+"Reboot(Normal mode)" (`FUN_00401F40`) is one connection: wait 5 s (`FUN_00402DB0`), `X(1,2,1)`
+and wait for its ACK (`FUN_00403520`; the loader ACKs sub 2 at `0xFFC26A`), wait 5 s,
+`RBNORM\r` → `RBSTART` (`FUN_00404B40`), wait 5 s, close. It writes parameter RAM, not flash.
 
 Both flows are implemented and simulator-tested (not re-run on the unit): `loader_client.py
 settings-save` (steps 1–4 + the X+RBNORM exit of step 5) and `settings-restore` (`L` sub 1
-+ `P` to RAM 0x040C–0x2701 + X+RBNORM). `FUN_004038F0`/`FUN_00403C50` were not in the
-decompile dump; their frame layout is taken from the updater's `L`/`P`
-(`FUN_0041A070`/`FUN_0041A7E0`) — a difference to confirm against a real restore.
++ `D` to RAM 0x040C–0x2701 + X with its ACK, then RBNORM). The earlier note that these two
+functions were missing, and that the frames were copied from the updater's `P`, is closed:
+the data frames are `D`.
 
 ## 4. Open items
 

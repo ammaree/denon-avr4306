@@ -282,14 +282,14 @@ The client is no longer read-only. Beyond `version`/`check`/`read`/`dmdump`/`wri
 - **`status`** — read-only VI? parsed per processor, plus a normal-mode `C` probe to report
   normal vs update mode.
 - **`settings-save`** / **`settings-restore`** — the SSManage flows (update-tools.md §3a).
-  Save = `S` sub 1 then slice 0x040C–0x2701; restore = `L` **sub 1** + `P` of the 8,950-byte
+  Save = `S` sub 1 then slice 0x040C–0x2701; restore = `L` **sub 1** + `D` of the 8,950-byte
   body to parameter **RAM** (not flash, no MAIN wear). Both exit by X(1,2,1)+RBNORM
   (`frame_x_normal`, `RBNORM`), or `--power-cycle-exit`.
 - **`verify`** — `S` sub-0 read-back, or the DM dump, compared byte-for-byte to a reference.
 - **`rollback`** — `write` restricted to the vendor image.
 - A structured per-run log in `dumps/session-log.jsonl`.
 
-`frame()` is still C/S/A/N only; `L`/`P`/`I`/`X` have their own MAIN-only builders.
+`frame()` is still C/S/A/N only; `L`/`P`/`D`/`I`/`X` have their own MAIN-only builders.
 
 ### 2.8 Updater control flow and what one run writes (decompiled 2026-11-06)
 

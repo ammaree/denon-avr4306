@@ -15,10 +15,13 @@ Implements the protocol as decompiled from the 6.0.0.4 updater (docs/loader-inte
                 --i-badck corrupts its checksum; needs update mode.
                 L (0x4C) -> ACK: begin a load. sub-0 flash load erases the range (sets 0xFF);
                 sub-1 settings load (RAM 0x040C-0x2701) just overwrites.
-                P (0x50) -> ACK per frame: data written into flash (img) or RAM per the
-                address, so a following S read returns what was written. L/P need update mode.
-                X (0x58) -> consumed (no reply): SSManage X(1,2,1) 'Reboot(Normal mode)'.
-                RBNORM\\r -> RBSTART and leaves update mode (the SSManage exit).
+                P (0x50) -> ACK per frame on a sub-0 flash load only (the loader's flash
+                state accepts 'P' and rejects 'D', 0xFFCAA8). Data lands in the image.
+                D (0x44) -> ACK per frame on a sub-1 RAM load only (the loader's RAM
+                state accepts 'D' and rejects 'P', 0xFFCCC4). Data lands in RAM.
+                X (0x58) -> ACK for X(1,2,1) (the loader ACKs sub 2, 0xFFC26A). A wrong
+                X is NACKed. RBNORM\\r on the same connection -> RBSTART and leaves
+                update mode (the SSManage exit, FUN_00401F40).
                 This is the write/restore side the vendor tools use (FUN_0041a070/FUN_0041a7e0;
                 SSManage FUN_00402370->FUN_00403280); it lets `write`, `settings-save`,
                 `settings-restore`, `verify` and `rollback` be tested without a real unit.
@@ -136,11 +139,15 @@ def serve_loader(sock, img, corrupt, nack=0, write_out=None):
                         c.sendall(rep + bytes([(ck(rep) + bad) & 0xFF]))   # 3 + 50 + 1 = 54 B
                         print(f'loader: I -> model {model:#06x}')
                     elif t == ord('X'):
-                        # SSManage 'Reboot(Normal mode)' mode frame X(1,2,1): AA 58 tgt 02 01
-                        # ck (6 B). The vendor expects no reply (it just waits), so consume
-                        # and stay quiet; RBNORM is what actually leaves update mode.
+                        # SSManage X(1,2,1): AA 58 tgt 02 01 ck (6 B). The loader ACKs sub
+                        # 2/3/0x0A/0x0B (0xFFC26A) and FUN_00403520 waits for that ACK.
+                        # RBNORM, on this same connection, is what leaves update mode.
                         f = h + recv_exact(c, 3)
-                        print(f'loader: X(1,2,1) mode frame {f.hex(" ")}')
+                        good = (ck(f[:-1]) == f[-1] and STATE['update']
+                                and f[3] in (0x02, 0x03, 0x0A, 0x0B))
+                        print(f'loader: X {f.hex(" ")} {"ACK" if good else "NACK"}')
+                        rep = (b'\xAAA' if good else b'\xAAN') + bytes([tgt])
+                        c.sendall(rep + bytes([ck(rep)]))
                     elif t == ord('L'):
                         # begin load: AA 4C tgt sub vh vl start32 end32 ck (15 B total)
                         f = h + recv_exact(c, 12)
@@ -166,15 +173,19 @@ def serve_loader(sock, img, corrupt, nack=0, write_out=None):
                         pframe = 0
                         ack = b'\xAAA' + bytes([tgt])
                         c.sendall(ack + bytes([ck(ack)]))
-                    elif t == ord('P'):
-                        # image data: AA 50 tgt status len16 addr32 payload ck
+                    elif t in (ord('P'), ord('D')):
+                        # data: AA 'P'|'D' tgt status len16 addr32 payload ck.
+                        # Flash load (sub 0) accepts only 'P'; RAM load (sub 1) accepts
+                        # only 'D'. The other type is a NACK, as on the unit.
                         h2 = h + recv_exact(c, 7)        # status, len16, addr32
                         status = h2[3]
                         n = int.from_bytes(h2[4:6], 'big')
                         addr = int.from_bytes(h2[6:10], 'big')
                         f = h2 + recv_exact(c, n + 1)    # payload + ck
                         pframe += 1
-                        if ck(f[:-1]) != f[-1] or load is None or not STATE['update']:
+                        want = ord('D') if (load is not None and load[1] == 1) else ord('P')
+                        if (ck(f[:-1]) != f[-1] or load is None or not STATE['update']
+                                or t != want):
                             STATE['violations'] += 1 if load is None else 0
                             rep = b'\xAAN' + bytes([tgt])
                             c.sendall(rep + bytes([ck(rep)]))
@@ -192,7 +203,8 @@ def serve_loader(sock, img, corrupt, nack=0, write_out=None):
                         ack = b'\xAAA' + bytes([tgt])
                         c.sendall(ack + bytes([ck(ack)]))
                         if status in (0, 3):             # 'only' or 'last' frame: load done
-                            print(f'loader: load complete, {pframe} P frames')
+                            kind = 'D' if t == ord('D') else 'P'
+                            print(f'loader: load complete, {pframe} {kind} frames')
                             if write_out and load is not None:
                                 _, _, _, ls, le = load
                                 if ls >= 0xF00000:

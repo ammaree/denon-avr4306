@@ -138,7 +138,12 @@ def test_settings_restore_roundtrip(image):
     check('settings-restore: RAM 0x040C-0x2701 received exactly', got == body,
           f'{len(got)} vs {len(body)}')
     check('settings-restore: model guard ran', '0x0011 confirmed' in out, out[-200:])
-    check('settings-restore: X+RBNORM exit', 'RBNORM confirmed' in out, out[-200:])
+    check('settings-restore: data frames are D, not P',
+          'D frames' in out and 'P frames' not in out, out[-300:])
+    check('settings-restore: X acknowledged before RBNORM',
+          'X(1,2,1) acknowledged' in out and 'RBNORM confirmed' in out, out[-300:])
+    check('settings-restore: SSManage 5 s ACK and exit waits',
+          lc.SETTINGS_ACK_SECS == 5.0 and lc.EXIT_WAIT == 5.0)
     check('settings-restore: logged start+done',
           any(e['kind'] == 'settings-restore-start' for e in ev)
           and any(e['kind'] == 'settings-restore-done' for e in ev))

@@ -108,7 +108,7 @@ unit beyond the write above**:
 - `status` — read-only VI? + a mode probe. `verify` — read-back (S sub 0, or the DM dump)
   compared byte-for-byte to a reference; read-only.
 - `settings-save` / `settings-restore` — the SSManage save/load flows (update-tools.md §3a):
-  save reads the parameter RAM 0x040C–0x2701; restore writes it back with `L` sub 1 + `P`.
+  save reads the parameter RAM 0x040C–0x2701; restore writes it back with `L` sub 1 + `D`.
   **RAM, not flash** — a restore costs no MAIN flash cycle and cannot brick the unit — but
   it enters update mode, so it needs `--confirm-restore` and the environment parts of this
   checklist. This is how the settings reset by a MAIN write are recovered.
