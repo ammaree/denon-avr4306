@@ -76,7 +76,8 @@ MAIN_START, MAIN_END = 0xF00000, 0xFFBFFF    # application range (blocks 3-20); 
 MAIN_SIZE = MAIN_END - MAIN_START + 1        # 0xFC000 = 1,032,192 B = 1008 x 0x400
 MAIN_VERSION = 0x0100                        # 'L' version word for "01.00" (vendor value)
 P_CHUNK = 0x400                              # MAIN payload per P frame (target 1)
-L_ACK_SECS = 10.0                            # 'L' ACK timeout (FUN_0041a070 local_4 = 10)
+L_ACK_SECS = 6.0                             # 'L' ACK timeout, TCP path (FUN_0041d600: 6; COM path 10)
+POST_WRITE_SETTLE = 5.0                      # vendor wait after the last P before verify (0x40876b)
 P_ACK_FIRST_LAST = 60.0                      # first (erase) and last frame (0x3c)
 P_ACK_MIDDLE = 6.0                           # middle frames
 FRAME_RETRIES = 3                            # vendor: initial send + up to 3 retries
@@ -499,7 +500,9 @@ def cmd_write(a, log):
         if not connect_check(l, MAIN_TARGET, log, tries=3):
             sys.exit('loader did not answer C after RBSTART; nothing written. Power-cycle '
                      'the unit and check the version screen.')
-        # L: begin load / erase (FUN_0041a070). ACK within 10 s, 3 retries.
+        # L: begin load (FUN_0041d600, TCP path). ACK within 6 s, 3 retries. The vendor
+        # also sends an 'I' (target information) frame between C and L and checks the
+        # model code; this tool does not (untested difference, main-dump-patch.md §5).
         if not send_with_retry(l, frame_l(MAIN_START, MAIN_END), L_ACK_SECS, log, 'L'):
             sys.exit('L not acknowledged; the loader did not start the write. The flash is '
                      'not yet erased. Power-cycle and check the version screen.')
@@ -514,7 +517,7 @@ def cmd_write(a, log):
             if not send_with_retry(l, frame_p(status, addr, payload), secs, log,
                                    f'P[{i + 1}/{nframes}] {addr:#08x}'):
                 sys.exit(f'\nWRITE FAILED at frame {i + 1}/{nframes} ({addr:#08x}). MAIN is '
-                         'now partly written. DO NOT power off mid-thought: follow '
+                         'now partly written. Do not power off yet: follow '
                          'safety-plan.md recovery (re-run with the rollback image if the '
                          'loader still answers C).')
             if status == 1:
@@ -525,6 +528,9 @@ def cmd_write(a, log):
     finally:
         l.close()
     # --- verify: full S sub-0 read-back, byte-for-byte (Option C / main-dump-patch §5) ---
+    # Vendor: 5 s between the last P and the post-write step (FUN_00408310, 0x40876b).
+    # Also keeps the connection churn down (docs/lan-access.md).
+    time.sleep(max(POST_WRITE_SETTLE, a.delay))
     ok = a.no_verify or verify_readback(a, img, log)
     print('\nNOW: turn the unit off with its power switch, wait 10 s, turn it on '
           '(vendor manual 3.9-3). Then check the version screen and a VI? query.')

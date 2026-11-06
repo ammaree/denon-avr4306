@@ -98,10 +98,17 @@ Limits of the offline checks:
 
 **Status 2026-11-06: C built and simulator-tested, not on the unit.**
 `tools/loader_client.py write` implements it: the vendor `L`/`P` sequence transcribed from
-loader-interface.md §2.8 (`L` = `AA 4C 01 00 0100 F00000 FFBFFF ck`, ACK ≤ 10 s, 3 retries;
+loader-interface.md §2.8 (`L` = `AA 4C 01 00 0100 F00000 FFBFFF ck`, ACK ≤ 6 s, 3 retries;
 1008 `P` frames of 0x400 B, status 1/2/3, ACK 60 s first/last and 6 s middle, 3 retries
-each; FUN_0041a070 / FUN_0041a7e0), then a full `S` sub-0 read-back compared byte-for-byte
-with the image. Guards: image sha256 must be one of the two pinned files (the patch build
+each; FUN_0041d600 / FUN_0041dd60; 5 s wait after the last `P`), then a full `S` sub-0
+read-back compared byte-for-byte with the image.
+
+Reviewed against the decompile 2026-11-06 (frames, chunk size, status bytes, timeouts,
+retry counts, `E` abort, all 1,008 frames sent). Two corrections made: the `L` timeout
+(was the COM path's 10 s) and the missing 5 s wait before verify. One difference left as
+is: the vendor sends an `I` (target information) frame between `C` and `L` and checks the
+model code; the writer goes straight from `C` to `L`. `S` after `C` without `I` worked on
+the unit on 2026-11-05, so `L` is expected to as well, but that is untested. Guards: image sha256 must be one of the two pinned files (the patch build
 or vendor 01.00 rollback) and exactly 0xFC000 B; `--confirm-write` is required and prints
 the safety-plan.md checklist until given; target is forced to 1; `L`/`P` builders refuse
 any other target; port 5001 is refused. `sim/fake_unit.py` grew the `L`/`P` write side

@@ -341,7 +341,12 @@ Every vendor container has MW:ON, BP:OFF, PV:OFF.
 
 **MAIN write frames** (`FUN_00419260` → `FUN_0041A070`, `FUN_0041A7E0`):
 - **`L`:** `AA 4C 01 00 vh vl start32 end32 ck`. The version word comes from the header
-  ("01.00" → 0x0100). An ACK is expected within 10 s, with up to 3 retries.
+  ("01.00" → 0x0100). An ACK is expected within 6 s on the TCP path (`FUN_0041D600`;
+  the COM path `FUN_0041A070` allows 10 s), with up to 3 retries.
+- **Before `L`:** after `C`, the vendor sends `I` = `AA 49 01 00000000 00000000 ck`
+  (`FUN_0041D3F0`), expects a 54-byte `I` reply, and checks that bytes 5–6 (model code)
+  equal the container's `0011` (`FUN_00407C60`, 0x407D81).
+- **After the last `P`:** 5 s wait (`FUN_00409ED0(5)`, 0x40876C) before the post-write step.
 - **Data:** then `P` frames of 0x400 bytes (BE address, status 1/2/3, layout as in
   §2.6).
   - For target 1 every frame is sent, erased ones included. All-0xFF middle frames are
