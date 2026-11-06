@@ -19,10 +19,11 @@ TCP 5001 is the DM850 bootloader channel; this tool refuses it.
   A / N   = AA 'A'|'N' tgt ck                   ACK / NACK from the PC after each data frame
 
 SAFETY (docs/safety-plan.md): the read-only frame builder `frame()` can only produce C, S,
-A and N frames. L (load/erase) and P (data) are built only by `write` (frame_l/frame_p),
-which this module exposes as a separate, explicitly gated MAIN-only command (Option C,
-docs/main-dump-patch.md §5). Nothing here sends DM850 loader commands, RBNORM, or any
-state-changing control command, and every builder forces target 1 (MAIN). `S`/`L`/`P` are
+A and N frames. I (target info), L (load/erase) and P (data) are built only by `write`
+(frame_i/frame_l/frame_p), which this module exposes as a separate, explicitly gated
+MAIN-only command (Option C, docs/main-dump-patch.md §5). I is read-only (it reports the
+model code, checked before any erase); nothing here sends DM850 loader commands, RBNORM,
+or any state-changing control command, and every builder forces target 1 (MAIN). `S`/`L`/`P` are
 sent only after the unit has answered RBUPDATE with RBSTART. Port 5001 (the DM850
 bootloader channel) is refused. Every connection is opened one at a time, with a delay,
 because the DM850 hangs under fast connection churn (docs/lan-access.md).
@@ -52,10 +53,11 @@ Commands:
   loader_client.py write   --ip IP --image PATH --confirm-write
         MAIN-only firmware write (Option C, docs/main-dump-patch.md §5), the vendor L/P
         sequence copied from docs/loader-interface.md §2.8. Enters update mode (VI?,
-        RBUPDATE/RBSTART, 15 s) unless --in-update-mode, sends L for 0xF00000-0xFFBFFF
-        then 1008 P frames of 0x400 bytes, then reads the whole application flash back
-        (S sub 0) and checks it byte-for-byte against the image. The image must be one of
-        the two accepted files (sha256-pinned). Afterwards the unit must be power-cycled.
+        RBUPDATE/RBSTART, 15 s) unless --in-update-mode; then C, an I (target information)
+        frame whose model code must be 0x0011 (AVR-4306) or the run aborts before any
+        erase, L for 0xF00000-0xFFBFFF, 1008 P frames of 0x400 bytes, then reads the whole
+        application flash back (S sub 0) and checks it byte-for-byte against the image. The
+        image must be one of the two accepted files (sha256-pinned). Power-cycle afterwards.
 
 Run with python3 -I. --control-port / --loader-port exist for the local test peer
 (sim/fake_unit.py).
@@ -81,6 +83,11 @@ POST_WRITE_SETTLE = 5.0                      # vendor wait after the last P befo
 P_ACK_FIRST_LAST = 60.0                      # first (erase) and last frame (0x3c)
 P_ACK_MIDDLE = 6.0                           # middle frames
 FRAME_RETRIES = 3                            # vendor: initial send + up to 3 retries
+# 'I' target-information frame, sent between C and L (loader-interface §2.8 "Before L").
+I_ACK_SECS = 10.0                            # FUN_0041d3f0 local_4 = 10 after the send
+I_REPLY_LEN = 54                             # fixed 54-byte 'I' reply (FUN_0041b290)
+MAIN_MODEL_CODE = 0x0011                     # reply payload bytes 5-6; container "0011"
+                                             # (FUN_00407C60 @ 0x407d81). 2-byte, BE.
 # Offline gate (safety-plan): the only images `write` may send to MAIN. sha256 -> label.
 ACCEPTED_IMAGES = {
     '9470fa599734b8341cbfae37617702e7f17be8228e622f63a0b5ca5fc2f31a96':
@@ -130,6 +137,42 @@ def frame_p(status, addr, payload, tgt=MAIN_TARGET):
     f = (b'\xAA' + b'P' + bytes([tgt, status]) + len(payload).to_bytes(2, 'big')
          + addr.to_bytes(4, 'big') + bytes(payload))
     return f + bytes([ck(f)])
+
+
+def frame_i(tgt=MAIN_TARGET, field1=0, field2=0):
+    """AA 49 01 field1-32 field2-32 ck (12 B). FUN_0041d3f0; the vendor sends all-zero
+    fields. MAIN only."""
+    if tgt != MAIN_TARGET:
+        raise ValueError('refused: write frames are MAIN (target 1) only')
+    f = (b'\xAA' + b'I' + bytes([tgt])
+         + field1.to_bytes(4, 'big') + field2.to_bytes(4, 'big'))
+    return f + bytes([ck(f)])
+
+
+def query_model(link, log, secs=I_ACK_SECS):
+    """Send the 'I' target-information frame and read the fixed 54-byte reply. Returns the
+    16-bit model code (reply payload bytes 5-6, FUN_0041b290), or None on timeout / a reply
+    that is not a well-formed 'I' for MAIN. The 'I' reply is a fixed-length frame, not a
+    D/P data frame, so it is read directly rather than through Link.read_frame."""
+    link.send(frame_i())
+    deadline = time.time() + secs
+    while True:
+        i = link.buf.find(b'\xAA')
+        if i >= 0 and len(link.buf) - i >= I_REPLY_LEN:
+            f = link.buf[i:i + I_REPLY_LEN]
+            link.buf = link.buf[i + I_REPLY_LEN:]
+            break
+        if time.time() >= deadline:
+            log('< I reply: timeout')
+            return None
+        link.fill(deadline)
+    if f[1] != ord('I') or f[2] != MAIN_TARGET:
+        log(f'< I reply: bad header {f[:3].hex(" ")}')
+        return None
+    model = (f[7] << 8) | f[8]               # payload bytes 5-6 (frame offsets 7-8)
+    ckok = ck(f[:-1]) == f[-1]
+    log(f'< I reply: {I_REPLY_LEN} B, model {model:#06x}, ck {"ok" if ckok else "BAD"}')
+    return model
 
 
 def read_ack(link, secs):
@@ -500,9 +543,18 @@ def cmd_write(a, log):
         if not connect_check(l, MAIN_TARGET, log, tries=3):
             sys.exit('loader did not answer C after RBSTART; nothing written. Power-cycle '
                      'the unit and check the version screen.')
-        # L: begin load (FUN_0041d600, TCP path). ACK within 6 s, 3 retries. The vendor
-        # also sends an 'I' (target information) frame between C and L and checks the
-        # model code; this tool does not (untested difference, main-dump-patch.md §5).
+        # I: target information, between C and L (loader-interface §2.8 "Before L";
+        # FUN_004081c0 -> FUN_0041d3f0, model check FUN_00407C60 @ 0x407d81). Guard that
+        # this is an AVR-4306 BEFORE any erase; refuse on a wrong/missing model code.
+        model = query_model(l, log)
+        if model is None:
+            sys.exit('I (target information) not answered; nothing written (no erase). '
+                     'Power-cycle the unit and check the version screen.')
+        if model != MAIN_MODEL_CODE:
+            sys.exit(f'refused: unit model code {model:#06x} != expected '
+                     f'{MAIN_MODEL_CODE:#06x} (AVR-4306). Nothing erased or written.')
+        print(f'unit model code {model:#06x} confirmed (AVR-4306).')
+        # L: begin load (FUN_0041d600, TCP path). ACK within 6 s, 3 retries.
         if not send_with_retry(l, frame_l(MAIN_START, MAIN_END), L_ACK_SECS, log, 'L'):
             sys.exit('L not acknowledged; the loader did not start the write. The flash is '
                      'not yet erased. Power-cycle and check the version screen.')

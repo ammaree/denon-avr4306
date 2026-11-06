@@ -104,19 +104,24 @@ each; FUN_0041d600 / FUN_0041dd60; 5 s wait after the last `P`), then a full `S`
 read-back compared byte-for-byte with the image.
 
 Reviewed against the decompile 2026-11-06 (frames, chunk size, status bytes, timeouts,
-retry counts, `E` abort, all 1,008 frames sent). Two corrections made: the `L` timeout
-(was the COM path's 10 s) and the missing 5 s wait before verify. One difference left as
-is: the vendor sends an `I` (target information) frame between `C` and `L` and checks the
-model code; the writer goes straight from `C` to `L`. `S` after `C` without `I` worked on
-the unit on 2026-11-05, so `L` is expected to as well, but that is untested. Guards: image sha256 must be one of the two pinned files (the patch build
+retry counts, `E` abort, all 1,008 frames sent). Three corrections made: the `L` timeout
+(was the COM path's 10 s), the missing 5 s wait before verify, and the missing `I`
+(target information) step. The writer now matches the vendor order `C` → `I` → `L` → `P`:
+it sends `I` = `AA 49 01 00000000 00000000 F4` (FUN_0041d3f0), reads the 54-byte reply
+(FUN_0041b290), and aborts **before any erase** unless the model code at reply bytes 5-6
+equals 0x0011 (AVR-4306; checked by the vendor at FUN_00407C60 0x407d81). The exact
+endianness/placement of that field and whether the loader rejects `L` without a prior `I`
+are still unverified on the unit. Guards: image sha256 must be one of the two pinned files (the patch build
 or vendor 01.00 rollback) and exactly 0xFC000 B; `--confirm-write` is required and prints
 the safety-plan.md checklist until given; target is forced to 1; `L`/`P` builders refuse
 any other target; port 5001 is refused. `sim/fake_unit.py` grew the `L`/`P` write side
 (erase on `L`, data applied to a mutable image so the read-back reflects it, `--nack` to
 exercise retries, `--write-out` to dump what it received). `sim/test_main_write.py` checks
-the frame bytes against the decompile and drives `write` end to end against the fake: both
-images written byte-exact, read-back verify passes, retries recover, update-mode entry
-works (`--slow`), and the refusals hold. **Not yet run against the unit** — that needs the
+the `L`/`P`/`I` frame bytes against the decompile and drives `write` end to end against the
+fake (which now also answers `I` with a settable model code): both images written
+byte-exact, the model code is confirmed before `L`, read-back verify passes, retries
+recover, update-mode entry works (`--slow`), a wrong model code is refused before any
+erase, and the other refusals hold. **Not yet run against the unit** — that needs the
 per-write checklist (safety-plan.md); it costs 1 of the 10 MAIN writes.
 
 **Rollback:** the same writer with vendor MAIN 01.00, which is byte-equal to the unit's

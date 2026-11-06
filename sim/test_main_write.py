@@ -77,6 +77,17 @@ def test_frames():
     except ValueError:
         check('P payload over 0x400 refused', True)
 
+    # 'I' target-information frame (loader-interface §2.8 "Before L", FUN_0041d3f0).
+    fi = lc.frame_i()
+    want_i = bytes([0xAA, 0x49, 0x01]) + bytes(8)
+    want_i += bytes([lc.ck(want_i)])
+    check('I frame = AA 49 01 00000000 00000000 ck', fi == want_i, fi.hex())
+    check('I frame is 12 bytes', len(fi) == 12, str(len(fi)))
+    check('I checksum (0xF4) = low byte of sum of first 11',
+          fi[-1] == sum(fi[:-1]) & 0xFF and fi[-1] == 0xF4, hex(fi[-1]))
+    check('I frame refuses non-MAIN target', _refuses(lambda: lc.frame_i(tgt=2)))
+    check('model code constant = 0x0011 (AVR-4306)', lc.MAIN_MODEL_CODE == 0x0011)
+
     check('offline gate: exactly two accepted images', len(lc.ACCEPTED_IMAGES) == 2)
     check('read-only frame() still refuses L', _refuses(lambda: lc.frame(b'L', 1)))
     check('read-only frame() still refuses P', _refuses(lambda: lc.frame(b'P', 1)))
@@ -142,6 +153,21 @@ def test_write(image, label):
           f'{len(got)} vs {len(want)} bytes')
     check(f'write {label}: sha256 of received == image',
           hashlib.sha256(got).hexdigest() == hashlib.sha256(want).hexdigest())
+    check(f'write {label}: model code confirmed before L',
+          '0x0011 confirmed' in log, log[-300:])
+
+
+def test_wrong_model(image):
+    # The fake reports a non-4306 model code: write must refuse at the I check, before any
+    # L/P, so the image is never dumped (no erase/write happened).
+    out = tempfile.NamedTemporaryFile(suffix='.bin', delete=False).name
+    os.unlink(out)                               # must stay absent if nothing is written
+    with Fake(image, start_update=True, model='0x0012', write_out=out) as fk:
+        rc, log = run_write(fk, image, '--in-update-mode', '--confirm-write')
+    check('wrong model: write refused (exit != 0)', rc != 0, log[-300:])
+    check('wrong model: message names the model code', 'model code' in log, log[-300:])
+    check('wrong model: nothing erased or written (no L/P, no dump)',
+          not os.path.exists(out))
 
 
 def test_retry(image):
@@ -201,6 +227,7 @@ def main():
     test_write(patch, 'DM-patch image')
     test_write(vendor, 'vendor rollback image')
     test_retry(patch)
+    test_wrong_model(patch)
     test_refusals(patch)
     if slow:
         print('   (--slow) full update-mode entry, includes the vendor 15 s settle...')

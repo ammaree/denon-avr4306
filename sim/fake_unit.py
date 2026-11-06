@@ -10,6 +10,8 @@ Implements the protocol as decompiled from the 6.0.0.4 updater (docs/loader-inte
                 each acknowledged by the PC; S is NACKed unless in update mode. As on the
                 real unit, S ignores start/end: sub 0 streams the image (0xF00000..),
                 sub 1 streams RAM 0x0400-0xC3FF.
+                I (0x49) -> fixed 54-byte reply carrying the model code at payload bytes
+                5-6 (--model, default 0x0011 = AVR-4306); needs update mode.
                 L (0x4C) -> ACK: begin a load; erases the given flash range (sets 0xFF).
                 P (0x50) -> ACK per frame: image data, written into the in-memory image so
                 a following sub-0 S read-back returns what was written. L/P need update
@@ -28,6 +30,7 @@ Any other frame type is answered with NACK and logged as a protocol violation.
 import argparse, socket, threading
 
 STATE = {'update': False, 'violations': 0}
+I_REPLY_LEN = 54                 # fixed 'I' target-information reply (loader-interface §2.8)
 
 
 def ck(b):
@@ -106,6 +109,21 @@ def serve_loader(sock, img, corrupt, nack=0, write_out=None):
                         if STATE['update']:
                             rep = b'\xAA' + b'C' + bytes([tgt])
                             c.sendall(rep + bytes([ck(rep)]))
+                    elif t == ord('I'):
+                        # target information: AA 49 tgt field1-32 field2-32 ck (12 B in),
+                        # fixed 54-byte reply out (loader-interface §2.8, FUN_0041b290).
+                        f = h + recv_exact(c, 9)
+                        if ck(f[:-1]) != f[-1] or not STATE['update']:
+                            rep = b'\xAAN' + bytes([tgt])
+                            c.sendall(rep + bytes([ck(rep)]))
+                            continue
+                        payload = bytearray(I_REPLY_LEN - 4)      # 50 B
+                        model = STATE.get('model', 0x0011)
+                        payload[4] = (model >> 8) & 0xFF          # frame byte 7 \  model code
+                        payload[5] = model & 0xFF                 # frame byte 8 /  bytes 5-6
+                        rep = b'\xAA' + b'I' + bytes([tgt]) + bytes(payload)
+                        c.sendall(rep + bytes([ck(rep)]))         # 3 + 50 + 1 = 54 B
+                        print(f'loader: I -> model {model:#06x}')
                     elif t == ord('L'):
                         # begin load: AA 4C tgt sub vh vl start32 end32 ck (15 B total)
                         f = h + recv_exact(c, 12)
@@ -214,10 +232,13 @@ def main():
     ap.add_argument('--dm', action='store_true', help='answer DMaaaaaa? like the DM patch')
     ap.add_argument('--start-update', action='store_true',
                     help='boot already in update mode (skip RBUPDATE; for fast write tests)')
+    ap.add_argument('--model', type=lambda x: int(x, 0), default=0x0011,
+                    help="model code in the 'I' reply (default 0x0011 = AVR-4306)")
     a = ap.parse_args()
     img = bytearray(open(a.image, 'rb').read())      # mutable: L/P writes are visible to S
     STATE['dm'] = a.dm
     STATE['update'] = a.start_update
+    STATE['model'] = a.model
     STATE['mem'] = lambda x: (x * 7 + 3) & 0xFF if x >= 0xFFC000 else mem_read(img, x)
     ts = socket.create_server(('127.0.0.1', a.telnet_port))
     ls = socket.create_server(('127.0.0.1', a.loader_port))
