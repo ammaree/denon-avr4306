@@ -14,9 +14,10 @@ location is established but the change is not yet specified.
 ## Coverage
 
 Audited in depth: the serial/network **command ingress and parse path** (the main
-remote attack surface) and the **version/identity** storage. Located and scoped, needing
-one focused follow-up decompile before any change: the **display/dimmer** path and the
-**watchdog/timing**. Not covered: every per-command handler leaf — per
+remote attack surface), the **version/identity** storage (exact bump byte confirmed), and
+the **display/dimmer** path (traced to a 4-level menu parameter; the dim-level state
+variable is the one remaining item to pin). Open: the **watchdog/timing**. Not covered:
+every per-command handler leaf — per
 `docs/control-protocol.md` those need per-command live tracing and the boot block, and
 are out of scope for this pass.
 
@@ -57,36 +58,55 @@ MAIN:SUB::DSP:::::::AVR4306M:Ver00:01:0000:MAIN:Ver01.00:0000:SUB::Ver00.01:0000
 are template defaults — the real SUB (`00.50`) and DSP (`00.04`) values `VI?` reports come
 from those modules at runtime, not this block.
 
-**Bump for p1:** change `Ver01.00 → Ver01.01` at 0xFFBEB0. **Before the write**, decompile
-the init parser at 0xF00360 to confirm how the `VI?` MAIN field `0100` is derived from the
-block (whether it reads `Ver01.00` or the `Ver00:01` packed field), so the bump actually
-changes what `VI?` reports. This is a bounded, one-function follow-up.
+**Bump for p1 (confirmed, exact):** the init parsers `FUN_f00360` (0xF00360) and
+`FUN_f003f6` (0xF003F6) read the identity block through the boot-block hex-digit routine
+`0xFFC742` and pack ASCII pairs into the version bytes. For MAIN they read block offsets
+`+0x33/+0x34` and `+0x36/+0x37` — i.e. `0xFFBEB3-B7`, the `01.00` in `Ver01.00` — giving
+version bytes `0x01, 0x00`, which `VI?` renders `0100`. So the bump is one field: change
+`0xFFBEB6-B7` from `"00"` to `"01"` (`Ver01.00 → Ver01.01`); `VI?` then reports `0101`. No
+other change is needed for the version, and nothing else reads the string by value (the
+only two abs24 refs to the block are these parsers).
 
-## 3. Display on/off/dimming (scoped — the main enhancement)
+## 3. Display on/off/dimming — traced (the main enhancement)
 
-This is the owner's stated goal (CLAUDE.md). Findings:
+This is the owner's stated goal (CLAUDE.md). Traced 2026-11-06.
 
-- There is **no serial/network dimmer command**: the recovered token table
-  (`docs/control-protocol.md`) has no `DIM`/display token. The front-panel dimmer
-  (BRIGHT/DIM/DARK and off) is handled **internally** — a front-panel key sets the VFD
-  brightness; nothing on RS-232 or the network can set it today.
-- The on-screen/front text strings are the OSD table near 0xF87AB0 (surround modes, `RSZ`
-  resize, radio genres); these are display *content*, not the brightness control.
+**The dimmer is a 4-level MAIN menu parameter, not a serial command.** Confirmed facts:
 
-Enhancement options (each needs the VFD-driver path located first):
+- **No serial/network dimmer command exists.** The protocol spec (control-bridge
+  `docs/reference/Denon-AVR-4306-control-protocol-v4.6a.pdf`) has no dimmer/brightness
+  command; `SS` is setup-menu navigation, `SY` is remote/panel lock. The recovered token
+  table (`docs/control-protocol.md`) likewise has no display token. So adding remote
+  dimmer control is **genuinely new functionality**, not exposing something hidden.
+- **The dimmer is a System Setup menu item with 4 levels.** The display strings are at
+  `0xF80872` and the three below it: `DIMMER:  3` (brightest), `DIMMER:  2`, `DIMMER:  1`,
+  `DIMMER:  0` (off/darkest), 16 bytes each, consecutive. The front-panel/remote DIMMER
+  key cycles this 0–3 level.
+- The level string is selected and copied into the display buffer at `0xF17F6E`
+  (→ `FUN_f1b270` at 0xF1B270, a byte-copy). So the menu reads a dim-level variable (0–3),
+  indexes these four strings, and shows the line.
 
-1. **Add a dimmer command** to the control protocol so control-bridge and DeRemote can set
-   display brightness and off over TCP/RS-232. Highest value, fits the broader goal of
-   richer remote control.
-2. **A true display-OFF** state, and **persisting** the dim level across power cycles /
-   standby if it currently resets.
+**Why this is lower-risk than it first looked:** the full get/set/apply machinery for the
+dim level already exists (the menu sets it and the display applies it). The enhancement
+hooks a new command into that existing variable and apply path — it does **not** require
+writing a VFD driver from scratch.
 
-**Next step (follow-up decompile):** find the VFD driver and the dimmer state byte by
-xref from the front-panel key scan and the OSD write path, then specify the change and an
-offline (sim) gate — the same discipline as the DM-dump patch. Until that is done, no
-display change is write-ready. This is the one piece that should gate the timing of the
-p1 write: ideally p1 = version bump **+** the dimmer enhancement, so the cycle delivers
-both.
+Enhancement design for p1:
+
+1. **Add a remote dimmer command** (a new token, or a `SY`-group sub-command) whose handler
+   writes the existing dim-level variable (0–3) and calls the same apply the menu uses, so
+   control-bridge and DeRemote can set brightness and off over TCP/RS-232.
+2. **Confirm whether level 0 is a true display-OFF** or only darkest; if there is no true
+   off, add it. Check whether the level **persists** across standby/power-cycle and, if
+   not, store it with the other settings.
+
+**Remaining precise work before the write (bounded):** pin the **dim-level state variable**
+(the byte the menu set-handler reads/writes) and the **apply call**, by sim-tracing the
+menu handler around `0xF17F6E`/`0xF1B270` the way `docs/control-protocol.md` traced the PW
+handler (auto-analysis does not resolve the M32C menu boundaries cleanly). That gives the
+exact variable the new command must write and the exact apply to call — then the command
+and its offline (sim) gate can be specified. This is one or two functions of tracing, not
+a VFD-driver reverse-engineering effort.
 
 ## 4. Watchdog / timing (open — affects what p1 must include)
 
@@ -111,8 +131,10 @@ One write, version-bumped, carrying every change that is gated and ready:
 1. **Version bump `01.00 → 01.01`** (§2) — makes a patched unit self-identifying and
    retroactively versions the DM-dump patch already present. Confirm the `VI?` source
    first (§2 follow-up).
-2. **Display/dimmer enhancement** (§3) — once the VFD path is decompiled and an offline
-   gate exists. This is the reason to do the audit now: batch it with the version bump.
+2. **Remote dimmer command** (§3) — the dimmer is a 4-level MAIN menu parameter with the
+   get/set/apply machinery already present; the command hooks into it. Ready to specify
+   once the dim-level state variable and apply call are pinned by the bounded sim-trace in
+   §3. Batch it with the version bump so one cycle delivers both.
 3. **Watchdog refresh** in long operations (§4) — only if §4 shows MAIN uses the watchdog.
 4. **Decision on the DM-dump patch:** keep it (it is inert unless a `DM` line arrives) or
    drop it in the same write. The 01.01 image can include or exclude it.
