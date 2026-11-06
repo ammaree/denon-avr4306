@@ -29,6 +29,14 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 IMAGE = os.path.join(ROOT, 'build', 'images', 'DM850I_x.flash.bin')
 OUT = os.path.join(ROOT, 'build', 'patch', 'DM850I_ssdp.flash.bin')
 
+# Version stamp (docs/VERSIONS.md). The bCoD build stamp at header 0x08 is 14 ASCII
+# digits YYYYMMDDhhmmss; VI? reports it to the minute as `I` + YYYYMMDDhhmm. Patched
+# builds advance the minute by the patch revision so a flashed unit is self-identifying.
+# Vendor 20080527074501 -> VI? I200805270745. Rev 1 (this build) -> I200805270746.
+STAMP_OFF = 0x08
+VENDOR_STAMP = b'20080527074501  '
+PATCHED_STAMP = b'20080527074601  '    # rev 1: minute 45 -> 46
+
 # Big-copy mapping: file offset = 0x161EC + (VA - 0x60008000).
 SDRAM = 0x60008000
 FILE_DELTA = 0x161EC - SDRAM
@@ -111,6 +119,11 @@ def build_cave(guard):
 def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     image = bytearray(open(IMAGE, 'rb').read())
+    # Version uptick (before the CRC fix, which covers the header stamp).
+    if bytes(image[STAMP_OFF:STAMP_OFF + len(VENDOR_STAMP)]) != VENDOR_STAMP:
+        raise SystemExit(f'build stamp is {bytes(image[STAMP_OFF:STAMP_OFF+16])!r}, '
+                         f'expected the vendor stamp {VENDOR_STAMP!r}')
+    image[STAMP_OFF:STAMP_OFF + len(PATCHED_STAMP)] = PATCHED_STAMP
     placed = []
     assemblers = set()
     # Guard against two caves overlapping.
@@ -143,6 +156,8 @@ def main():
         raise SystemExit('CRC check failed: ' + '; '.join(probs))
     open(OUT, 'wb').write(fixed)
     print(f'assembler {" ".join(sorted(assemblers))}')
+    print(f'version stamp {VENDOR_STAMP.strip().decode()} -> {PATCHED_STAMP.strip().decode()} '
+          f'(VI? I{PATCHED_STAMP[:12].decode()})')
     for gname, sname, site, cave, bl, clen in placed:
         print(f'  {gname}/{sname} site {site:#x} -> cave {cave:#x} BL {bl.hex()}')
     print(f'wrote {OUT}')
