@@ -28,6 +28,35 @@ The update agent (a separate resident task that handles vendor flash updates) ha
 UART1 path (`agent_uart1_rx_isr` 0xF01704, `agent_rx_dequeue` 0xF01242) and INTB table at
 `0xFFBD7C`; it is not the AV application (control-protocol.md correction).
 
+## Application init + super-loop (`app_cold_boot_entry` 0xF00000)
+
+The firmware is a classic **super-loop**. `app_cold_boot_entry` 0xF00000:
+
+```
+if (RAM 0x0400 != 0x1B) { RAM 0x0400 = 1; flag = cold }  else { flag = warm }  // init marker
+app_init 0xF04190(flag)                                                        // + more init
+... one-time init ...
+main_loop 0xF0003D:
+  do {
+    loop_tick_01 0xF09284; loop_tick_02 0xF0419C; loop_tick_03 0xF0A32A;
+    loop_tick_04_pwr_zone 0xF0227A; loop_tick_05 0xF06BD6; ... (17 ticks total) ...
+    loop_tick_17 0xF732D4;
+    FSET I;                                   // enable interrupts
+    r0 = clamp(RAM 0x0400 - 3, 0..0xC);       // mode selector
+    INDEXWD / JMPI  -> indexed mode dispatch   // per-mode work
+  } while (1);
+```
+
+So each pass runs 17 fixed subsystem ticks, re-enables interrupts, then does an
+indexed-by-mode dispatch keyed on RAM `0x0400`. The serial command engine, the setup menu
+and the display are driven from these ticks and the mode dispatch. The 17 tick functions
+are named `loop_tick_01..17` (roles to be identified in later iterations); `loop_tick_04`
+is the power/zone tick (`0xF0227A`, previously mislabeled as a PW sub-handler).
+
+**Correction:** `0xF02332` (`pwr_is_on`) is a one-line power-state query — `return (0x320C
+& 0x10) != 0` — called from ~30 sites, not the full PW command handler. The earlier trace
+(control-protocol.md) reached it as the leaf of the PW path, but it is a shared query.
+
 ## Serial control protocol flow (the main external surface)
 
 Two byte-serial links feed the same command engine: UART1 is the rear RS-232 port, UART0 is
