@@ -157,14 +157,39 @@ writer of `0x08A9` must keep them consistent — the firmware's own setter does 
 `settings-restore` writes whatever checksums are in the image, so going through the firmware
 setter (not a raw poke) is the safe path.
 
-### Still open: the VFD apply
+### The VFD apply is not value-scannable (checked)
 
-The one remaining piece is the **apply** — the function the menu's confirm/front-panel DIMMER
-path calls to push the new brightness to the VFD live (setting `0x08A9` alone changes the
-stored value, not the panel until applied). Pin it by tracing the DIMMER key handler to the
-display-controller write, or by watching what the firmware touches when the level changes.
-A remote dimmer command then: set `0x08A9` (via the firmware setter, so checksums stay right)
-and call the apply.
+Setting `0x08A9` alone changes only the stored value; the live panel updates when the
+firmware's **apply** runs. Attempts to find the apply by value-scan all came up empty:
+
+- `0x08A9` has **no** direct abs16 reference in the image — it is reached as a field of the
+  settings block through a base pointer.
+- Its offset in the block (`0x49D` from `0x040C`) has **no** real reference either; the three
+  `9d 04` byte matches are `JMP.W`/`JSR.W` displacements (`ce 9d 04`, `cf 9d 04`), not the
+  offset. So the base is a sub-structure pointer and the real displacement is something else.
+- The display buffer `0x414E` has 41 references, all menu builders **writing** it; the shipper
+  that reads it and drives the VFD uses a base pointer, not an immediate.
+
+So the dimmer setter, the apply and the VFD driver all live in pointer/struct-relative
+subsystem code that auto-analysis fragments — not reachable by scanning for a value. Pinning
+the apply means a manual control-flow trace of that subsystem, which is a larger effort.
+
+### Two ways to finish the remote dimmer command
+
+1. **Trace the apply** (manual): follow the front-panel/IR **DIMMER key** handler, or the
+   setup-menu confirm path for the dimmer item, to the function that pushes brightness to the
+   VFD. Then the command sets `0x08A9` via the firmware setter and calls that apply. Most work,
+   most direct.
+2. **Inject the DIMMER key event** (recommended, lower risk): have the command enqueue the
+   DIMMER key into the firmware's existing key/IR input queue, so the stock handler does the
+   whole set + checksum + apply exactly as a button press. Needs the key-input queue and the
+   DIMMER key code pinned (the IR-decode ISR and key dispatch are the anchors; the on-unit
+   `dmdump` patch can help identify the queue). Reuses 100% of the existing machinery, so no
+   apply address is needed — but it cycles the level, so to set an absolute level the command
+   also reads the current `0x08A9` and steps to the target.
+
+Either path is a focused follow-on. Neither blocks the §2 version bump, which stays the ready,
+independent content for the next MAIN write.
 
 **Implication for the enhancement:** the remote dimmer command is **not** a trivial poke — the
 level lives in the menu engine, reached through staging and an apply that are not yet pinned.
