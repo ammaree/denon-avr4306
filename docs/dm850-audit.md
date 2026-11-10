@@ -251,3 +251,27 @@ it. What is still only proposed:
 - Leave the module on a trusted segment. `pk_alloc` already refuses an oversize
   buffer; the TCP, DHCP, DNS and ICMP items in §3 are not located tightly enough
   to patch.
+
+## Audit status (2026-11-10) — DM850 brought to MAIN's level
+
+With the whole-program codebase (docs/dm850-codebase.md, ~12,361 functions) and the
+code-flow doc (docs/dm850-codeflow.md), the DM850 now has the same depth of analysis as
+MAIN. Audit state:
+
+- **Memory-safety (copy class): clean.** The whole-image copy-site scan (§5b) found the 3
+  known SSDP-crash copies and **no new confirmed bug**; every other variable-length copy
+  checks, clamps, or ensures capacity. ARMv5T has no hardware divide (division is a library
+  call that handles zero), so there is no divide-by-zero trap class either.
+- **Confirmed + fixed:** the SSDP service/device no-colon crash (the LAN hang), guarded and
+  gated (§1–4), versioned `dm850i-p1`, **not flashed**.
+- **Still suspected, not actionable:** the NicheStack INFRA:HALT class (§3) — third-party
+  object code, confirmable only by deep RE of a known-buggy stack, and **not actionable**
+  because the DM850 has no proven flash delivery or recovery path (the SSDP fix itself is
+  stuck on the same wall). Network-level isolation (control-bridge filter) is the standing
+  mitigation.
+- **Long tail (not done):** per-function naming of the ~12k functions, and per-subsystem
+  logic audits of the web server / UPnP control / NicheStack internals — the same
+  diminishing-returns tail as MAIN, and lower value here given the no-flash-path constraint.
+
+Conclusion: no fix is both needed and deliverable beyond the SSDP guards already built. The
+DM850's remaining real blocker is **delivery/recovery**, not more audit.
