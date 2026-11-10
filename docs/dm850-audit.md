@@ -185,6 +185,38 @@ patched image: with `r2 = 0x30` it dispatches, with `r2 = 212` (the long ST) it 
 the drop path to `0x6013618A`. So the datagram never reaches the arm once the
 pre-check is in place.
 
+## 5b. Codebase audit: copy-site scan (2026-11-10)
+
+With the whole-program codebase (docs/dm850-codebase.md), `tools/ghidra/AuditCopyArm.java`
+classified **all 442 copy-routine call sites** (`memcpy` 0x60011C90, `blk_copy` 0x60011D48)
+by length and destination:
+
+| Class | Count | Meaning |
+|---|---|---|
+| constant length | 309 | safe |
+| variable length, non-stack dest | 108 | lower risk (heap/caller buffer) |
+| **variable length into a stack dest** | **25** | the SSDP-crash shape — triaged below |
+
+Of the 25, **3 are the known SSDP-crash copies** (`urn_service_reply` ×2, `urn_device_reply`)
+— the scanner finding them validates it. The others were triaged:
+
+- **Bounded (safe):** `FUN_60070188` (checks `dst_size >= len`), `FUN_60076f94` (every copy
+  guarded `if size < len return`), `FUN_600797c4` (capacity ensured before copy),
+  `FUN_601548e8` (clamps the length to the buffer), `FUN_6012e084` (stack copy guarded
+  `len < 0x81`, the rest heap-allocated to fit). DM850 copy code generally checks or clamps.
+- **Suspected (not confirmed):** `FUN_600701c8` (`memcpy(dst, s, strlen(s))`, no dst-size
+  check), `FUN_60079324` (appends `field[6] + n` into a stack buffer, no total bound),
+  `FUN_601651b4` / `FUN_6016612c` / `FUN_60170938` (`memcpy(local, src, n)` into a stack
+  local with no visible bound on `n`). These are **candidates**, not confirmed bugs: each
+  needs its callers traced to see whether `n` is attacker-reachable and the buffer is truly
+  a fixed stack frame. They are the next-iteration targets.
+- Remaining (`FUN_60170668`, the two `blk_copy` sites) not yet triaged.
+
+Takeaway: the SSDP responder's missing length check was the exception, not the rule — most
+of the DM850's variable-length copies validate or clamp. The scan makes finding any other
+SSDP-class bug reproducible; the 5 suspected sites are where a second real bug, if any,
+would be.
+
 ## 5. Proposed, not applied
 
 ### Display on/off/dimming
