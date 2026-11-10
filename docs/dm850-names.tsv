@@ -1,0 +1,57 @@
+# DM850I annotation map — applied to the Ghidra project by tools/ghidra/ApplyNames.java
+# (same tool as MAIN's; -process DM850I_x.flash.bin). Columns: hexaddr <tab> name <tab> purpose.
+# ARM VAs in the reconstructed image. Sources: docs/dm850-map.md, docs/dm850-audit.md,
+# docs/dm850-multisession.md. Grows each RE iteration.
+
+# --- entry / scatter loader ---
+400E0080	dm850_reset	bCoD code entry; stack setup then branch to the scatter loader
+400E00C8	scatterload	__scatterload: copy regions to SDRAM (0x60008000 etc.), clear ZI, then start the app
+
+# --- SSDP / UPnP responder (the audited subsystem) ---
+601360E0	upnp_receiveData	UPnPModuleImpl::receiveData: SSDP/UPnP datagram handler; rejects >=0x200, parses, dispatches
+60067050	req_prs_translate	Req_Prs_Translate_Req: parse the request headers into the request struct
+6006FCFC	udp_check_msearch	UDP_Rec_Check_MSearch_Req: M-SEARCH validity check (0 = continue, nonzero = drop)
+6004A114	disc_srv_search_req	Disc_Srv_Search_Req: match ssdp:all / rootdevice / uuid / urn and classify the ST
+600496B4	disc_srv_classify	Classify the ST and call the type switch
+600496D6	disc_srv_schedule	Schedule a search reply; returns immediately when the classify result is 0
+60049A80	disc_srv_type_switch	ST type jump table; service arm 0x60049B1A (idx 7), device arm 0x60049AB4 (idx 5)
+60070A5C	urn_service_reply	Build the reply for a service ST (sub sp,#0x64); the SSDP-crash memcpy at 0x60070A7E
+60070974	urn_device_reply	Build the reply for a device ST (sub sp,#0x5C)
+601E5188	ssdp_fmt_table	SSDP format-string pointer table (:service: +0x40, :device: +0x1C, ssdp:all +0x44)
+601B50D4	str_urn	"urn:" literal
+601CE800	cave_urn_guard	Patch cave (ssdp_guard.S): no-colon URN guard for the service+device arms
+601CE820	cave_msearch_guard	Patch cave (msearch_guard.S): M-SEARCH ST-length pre-check at the dispatch
+
+# --- libc-ish ---
+600123A4	strstr	strstr
+60011C90	memcpy	memcpy (R0=dst, R1=src, R2=len)
+60011D48	blk_copy	Block copy used by receiveData to stage the datagram
+
+# --- NicheStack TCP/IP ---
+60124BA4	pk_alloc	NicheStack packet-buffer allocator (bigbufsiz 0x708; IRQ-context guard at 0x00540010)
+6010CF24	tcp_out	NicheStack TCP output (prints tcp_out:mbuf-nbuf)
+600D43F4	dhcp_got_addr	DHCP client: logs "got address %s"
+
+# --- ThreadX threads ---
+6011EA9C	threadx_create	ThreadX thread-create wrapper (r0=control block, r1=name, r2=entry)
+60049650	upnp_disc_create	Creates the UPnP Disc Thread
+6004A788	upnp_disc_thread	UPnP Disc Thread entry (discovery loop; reaches disc_srv_search_req)
+6006F938	upnp_tcp_create	Creates the UPnP TCP Thread
+6006FA98	upnp_tcp_thread	UPnP TCP Thread entry
+600459FC	swap_spaces_create	Creates Swap_Spaces_Thread
+600459F4	swap_spaces_thread	Swap_Spaces_Thread entry
+
+# --- Telnet control server (port 23) ---
+600A1168	serversocket_accept	ServerSocket::acceptSocket: accept one client then CLOSE the listener (single-session cause)
+6012D8CC	telnet_conn_service	Per-connection servicer: alloc stream + write thread, run the read loop, tear down
+6015F084	telnet_read_loop	Telnet read/parse loop (IAC negotiation); forwards command lines to the sink
+6015BCD8	sock_accept	accept()
+6015C940	sock_close	close()
+6011E9A0	heap_alloc	Heap allocator (size, flag)
+60156A28	gts_thread_start	GTS thread start
+6013557C	stream_read	Connection stream read
+
+# --- MAIN link (/dev/uart0) + display ---
+6004DA20	denon_link_send	Send a Denon control line to MAIN over /dev/uart0
+60063BA4	set_dim_psdim	Map display dim 0..6 to PSDIM 00..06 and send via denon_link_send
+6000939A	lcddisplay_ctor	LCDDisplay constructor
