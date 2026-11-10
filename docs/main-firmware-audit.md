@@ -83,6 +83,48 @@ name (inherently 0..N). So in the shipped command set this is not reachable with
 arbitrary index. Flagged because it is a bound that lives upstream, not here: if this path
 is ever extended (new sources, a new command that reuses it), add a local range check.
 
+## Pass 3 — whole-codebase risk scan, all subsystems (2026-11-10)
+
+To cover every subsystem for the memory-safety bug classes without hand-reading ~2000
+functions, `tools/ghidra/AuditScan.java` scans **every decoded instruction** (134,611 of
+them) for the dangerous patterns. Results:
+
+### 7. No unbounded block copy anywhere in the image (confirmed, positive — strongest result)
+
+The firmware uses the M32C block-move `SMOVF` at **45 sites**; the count register `R3` is
+loaded with a **compile-time constant** immediately before **every one** (checked all 45:
+`MOV.W #imm,R3` general or quick form). So there is **no variable-length / attacker-length
+block copy in MAIN** — the exact bug class that crashed the DM850 SSDP responder
+(docs/dm850-audit.md) does not exist here. Lengths range from 3 to `0xB0A` bytes (the last
+is the boot-loader copying a fixed region), all constant.
+
+### 8. Divide-by-zero is not a crash on this architecture (confirmed, non-issue)
+
+380 divide sites; only 5 use a register divisor. The M32C **does not trap divide-by-zero**
+— it sets the overflow flag and leaves an undefined result, no reset. So even an unguarded
+register-divisor divide yields a wrong value at worst, not a crash. One checked site
+(`0xF0445E`) even tests the result afterwards. Not a defect.
+
+### 9. Large stack frames carry locals, not copy buffers (confirmed, low)
+
+13 functions use a frame `>= 0x40` bytes. The only one on the external command path,
+`cmd_dispatch_group` (`0xF46172`, 132-byte frame — previously mislabeled `cmd_build_response`),
+holds small locals and dispatches by command id via a bounded `INDEXWD`/`JMPI` jump table;
+it is not a copy target. The other 12 are internal (menu/display/DSP). Because finding 7
+shows **no** unbounded copy exists, none of these frames can be overflowed by a length-driven
+copy; they are filled by constant-count copies or field stores. Low risk.
+
+### Coverage and honesty
+
+Pass 3 is a **pattern scan of every instruction in every subsystem** for the memory-safety
+classes (unbounded block copy, divide-by-zero, oversized stack buffers). It is not a
+per-function semantic/logic audit of all ~2000 functions — that is infeasible, and the
+external attack surface (the part that matters) got the per-function treatment in passes 1-2.
+Logic bugs inside internal subsystems (wrong state transitions, off-by-one in a menu, a bad
+table index like the §6 suspected item) are not fully covered by a pattern scan; they would
+surface only in targeted per-subsystem reads, which the framework (docs/main-codebase.md)
+supports on demand.
+
 ## Optimization
 
 A 20-year-old, in-field-stable firmware offers little safe optimization headroom, and every

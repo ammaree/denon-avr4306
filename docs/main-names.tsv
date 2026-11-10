@@ -24,9 +24,8 @@ F4BBF2	uart0_rx_assemble	UART0 (DM850 link) RX byte -> line buffer 0x528E; index
 F45EEC	cmd_per_line_step	Per received line: dispatch -> process -> build reply; then clears the line buffer
 F4B1C0	cmd_process	Command processor (DM-dump patch hooks here); id in r0, 0x113 = no reply
 F4B42E	cmd_token_dispatch	Scan token table 0xF87C3E; return the command id for a 2-char token (0 = unknown)
-F46172	cmd_build_response	Build the response line for a processed command
+F46172	cmd_dispatch_group	Command-group processor: cmd_token_dispatch then INDEXWD/JMPI jump-table by command id; 132-byte frame holds locals (not a copy buffer) — was mislabeled cmd_build_response
 F45F48	cmd_group_proc_a	Command-group sub-processor (calls cmd_process)
-F461A2	cmd_group_proc_b	Command-group sub-processor (+ arg helper 0xF4B8FC)
 F4B8FC	cmd_str_match	Bounded string compare: match received arg vs a reference of length param_4 (returns 1 if equal)
 F463EF	cmd_arg_proc	Command argument processor (source/surround/volume); validates MV volume (multiple of 5, < 0x79)
 F87C3E	tok_table	Command token table: {char token[2]; u8 zero; u8 id}, ~34 entries
