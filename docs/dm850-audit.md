@@ -204,18 +204,23 @@ Of the 25, **3 are the known SSDP-crash copies** (`urn_service_reply` ×2, `urn_
   guarded `if size < len return`), `FUN_600797c4` (capacity ensured before copy),
   `FUN_601548e8` (clamps the length to the buffer), `FUN_6012e084` (stack copy guarded
   `len < 0x81`, the rest heap-allocated to fit). DM850 copy code generally checks or clamps.
-- **Suspected (not confirmed):** `FUN_600701c8` (`memcpy(dst, s, strlen(s))`, no dst-size
-  check), `FUN_60079324` (appends `field[6] + n` into a stack buffer, no total bound),
-  `FUN_601651b4` / `FUN_6016612c` / `FUN_60170938` (`memcpy(local, src, n)` into a stack
-  local with no visible bound on `n`). These are **candidates**, not confirmed bugs: each
-  needs its callers traced to see whether `n` is attacker-reachable and the buffer is truly
-  a fixed stack frame. They are the next-iteration targets.
-- Remaining (`FUN_60170668`, the two `blk_copy` sites) not yet triaged.
+- **Initially suspected, resolved to bounded on full reading:** the 3-line grep window hid
+  the guards; the full decompile shows each is safe —
+  `FUN_60170938` clamps `n` to `0x80` (`else n = 0x80`) before the copy into a `0x80` buffer;
+  `FUN_60079324` calls `FUN_60079740(buf, field[6] + n)` to **ensure capacity** before the
+  append (heap buffer, not a fixed frame);
+  `FUN_600701c8` copies a **fixed table string** (`strlen` of a constant from `DAT_60070214`),
+  not attacker data;
+  `FUN_601651b4` / `FUN_6016612c` are local-to-local copies.
+- Still open, low confidence: the `n` origin in `FUN_601651b4`/`FUN_6016612c` was not pinned
+  to a bound (the copy shape is innocuous and both are local-to-local, so likely bounded);
+  `FUN_60170668` and the two `blk_copy` sites not fully read.
 
-Takeaway: the SSDP responder's missing length check was the exception, not the rule — most
-of the DM850's variable-length copies validate or clamp. The scan makes finding any other
-SSDP-class bug reproducible; the 5 suspected sites are where a second real bug, if any,
-would be.
+**Result: no new confirmed memory-safety bug.** The SSDP responder's missing length check
+was the exception; every other variable-length copy triaged either checks, clamps, or
+ensures capacity. The DM850's copy discipline is good. The scan (`AuditCopyArm.java`) makes
+this reproducible, and the two low-confidence sites are the only places a second copy bug
+could still hide.
 
 ## 5. Proposed, not applied
 
