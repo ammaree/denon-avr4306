@@ -61,6 +61,28 @@ adjacent RAM on a malformed internal reply — an information disclosure, not a 
 only to the connected control client. **Low priority;** bound the cumulative length against
 the buffer size if this area is ever touched.
 
+## Pass 2 — command argument parsing (2026-11-10)
+
+The next surface after the bounded line buffer: how handlers parse the command's argument.
+
+### 5. Argument matcher and numeric validation are sound (confirmed, positive)
+
+- `cmd_str_match` (`0xF4B8FC`, the shared helper) is a **bounded** byte compare of the
+  received argument against a reference string of length `param_4` (a small constant). No
+  overflow.
+- `cmd_arg_proc` (`0xF463EF`, the source/surround/volume argument processor) **range-checks
+  the numeric argument**: the master-volume value must be a multiple of 5 and `< 0x79`,
+  else it sets the error path. So out-of-range volumes are rejected, not applied. Good.
+
+### 6. Source/surround table index not locally bounds-checked (suspected, low)
+
+`cmd_arg_proc` indexes tables near `0xF870xx` by `[FB-0x2c] * 2` with no bounds check in
+the function itself. It is safe **only if** the upstream token match bounds that index —
+which it normally does, because the index is the position of a matched source/surround
+name (inherently 0..N). So in the shipped command set this is not reachable with an
+arbitrary index. Flagged because it is a bound that lives upstream, not here: if this path
+is ever extended (new sources, a new command that reuses it), add a local range check.
+
 ## Optimization
 
 A 20-year-old, in-field-stable firmware offers little safe optimization headroom, and every
