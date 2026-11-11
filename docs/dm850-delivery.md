@@ -96,5 +96,12 @@ This is the one piece still to pin before a writer can be built; it is a read-on
 - **Delivery feasible:** yes — DM850I alone, no web-page/bootloader touch. (was: "open problem")
 - **Recovery:** **confirmed** (reconnect + re-flash via the surviving bootloader). (was: "no
   proven recovery path")
-- **Remaining:** the entry trigger (read-only probe) and the 5001 protocol transcription,
-  then build + gate the writer. The hard risk — bricking with no recovery — is resolved.
+- **Writer: built and offline-gated.** `tools/dm850_writer.py` (TFTP server + port-5001 text
+  orchestration) with a hard command whitelist (never `update bootloader`/`*webpage`/`erase`),
+  an image sha256 pin, and `--confirm-write` + `--sequence-confirmed` gates. Tested end to end
+  against `sim/fake_dm850.py` (`sim/test_dm850_writer.py`): the image arrives intact over TFTP,
+  the commands go in order, and every forbidden command is refused.
+- **Remaining before a real write:** (1) the read-only entry-trigger probe on the unit
+  (does 5001 open at boot / after `start bootloader`?), and (2) confirm the exact command
+  order against the unit — then `--sequence-confirmed` may be passed. The hard risk — bricking
+  with no recovery — is already resolved.
