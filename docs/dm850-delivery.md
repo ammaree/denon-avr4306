@@ -52,7 +52,27 @@ So the delivery sequence is: get the DM850 into bootloader mode → connect 5001
 image` / `start tftp client` → the DM850 pulls `DM850I_<code>.bcd` from our TFTP server →
 `start image` to boot the patched app. Full map: docs/updater-protocol.md.
 
-## 4. Open: the bootloader-entry trigger
+## 4a. On-unit read-only probes (2026-11-11) — entry resolved
+
+Two read-only probes on the unit (`tools/dm850_probe.py`, connect/recv only, no commands):
+
+- **The 5001 shell exists and is a `>` line shell.** Connecting to 5001 returns `>`; a bare
+  newline returns `\r\n>`. This is exactly the vendor bootloader shell (`>` prompt, `\r\n`
+  terminated commands) — RO test 2 confirmed.
+- **5001 is served by the running DM850 image, at ~40 s into boot.** A clean off→on watch
+  logged all ports **closed** while off, then (clean boot): port **80 at t=38.6 s**, then
+  **5001/5000/23 together at t=40.3 s**. So 5001 is not a separate early bootloader window —
+  the image brings up the `>` shell alongside the web (80) and telnet (23) servers.
+- **Reconciles the old "5001 closed" reading.** On 2026-11-05 the DM850 was hung (the SSDP
+  crash) when probed, so every port was down. Healthy and bridge-off, it serves 5001 fine.
+
+**Entry mechanism (resolved):** connect to the image's 5001 `>` shell (reliably up ~40 s
+after power-on), then send `start bootloader` to reboot into the flash bootloader for
+`update image` + TFTP. The writer's `--enter-bootloader` does exactly this. Sending
+`start bootloader` reboots the module (takes LAN control down until done), so it belongs to
+the gated write phase, not a read-only probe.
+
+## 4. The bootloader-entry trigger (background)
 
 "Checking DM800" (`FUN_004060B0`) connects to 5001 with a 5 s wait and up to 3 retries, and
 a state check (`FUN_004200B0` sends the handshake command strings). It does **not** send

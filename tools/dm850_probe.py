@@ -36,30 +36,31 @@ def try_open(ip, port, timeout=0.4):
 
 
 def watch(a):
-    print(f'watching {a.ip} ports 5001/5000/23 for {a.seconds}s — power-cycle the unit now')
+    ports = (5001, 5000, 23, 80)
+    print(f'watching {a.ip} ports {ports} for {a.seconds}s — logging every open/close '
+          f'transition. Power-cycle the unit now.')
     start = time.time()
-    opened = {}
+    state = {p: None for p in ports}     # None unknown, True open, False closed
     while time.time() - start < a.seconds:
         t = time.time() - start
-        for port in (5001, 5000, 23):
-            if port in opened:
-                continue
+        for port in ports:
             s = try_open(a.ip, port, 0.3)
+            now_open = s is not None
+            banner = b''
             if s:
-                opened[port] = t
-                banner = b''
                 try:
-                    s.settimeout(0.5)
-                    banner = s.recv(128)
+                    s.settimeout(0.4)
+                    banner = s.recv(64)
                 except OSError:
                     pass
                 s.close()
-                print(f'  t={t:5.1f}s  TCP {port} OPEN   banner={banner[:60]!r}')
-        time.sleep(0.25)
-    print('result:', {p: f'{t:.1f}s' for p, t in opened.items()} or 'nothing opened')
-    if 5001 in opened:
-        print('=> the DM850 bootloader listens on 5001; entry trigger = power-cycle + catch '
-              'this window')
+            if state[port] is None or now_open != state[port]:
+                tag = 'OPEN ' if now_open else 'close'
+                print(f'  t={t:5.1f}s  TCP {port:<4} {tag}'
+                      + (f'  banner={banner[:40]!r}' if banner else ''))
+                state[port] = now_open
+        time.sleep(0.4)
+    print('final:', {p: ('open' if v else 'closed') for p, v in state.items()})
 
 
 def prompt(a):
