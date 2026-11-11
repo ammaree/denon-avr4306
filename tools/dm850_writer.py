@@ -155,7 +155,7 @@ def _cmd(sh, c):
 
 
 def run_write(ip, image_path, served_name, confirm, sequence_confirmed, enter_bootloader,
-              probe=False):
+              probe=False, tftp_port=69):
     data, sha = pin_image(image_path)
     allowed = accepted_shas()
     if allowed and sha not in allowed:
@@ -169,9 +169,10 @@ def run_write(ip, image_path, served_name, confirm, sequence_confirmed, enter_bo
         checklist()
     else:
         print('PROBE: entering bootloader and confirming the image fetch, WITHOUT writing.')
-    tftp = TftpServer(served_name, data, probe=probe)
+    tftp = TftpServer(served_name, data, port=tftp_port, probe=probe)
     tftp.start()
-    print(f'  [TFTP] server on this host:{tftp.port} (image {len(data)} B, sha {sha[:12]}…)')
+    print(f'  [TFTP] server on this host:{tftp.port} (image {len(data)} B, sha {sha[:12]}…) '
+          f'— the DM850 will fetch from this host')
     sh = Shell(ip)
     print(f'  5001 connected; prompt seen')
     try:
@@ -218,12 +219,14 @@ def main():
     ap.add_argument('--sequence-confirmed', action='store_true')
     ap.add_argument('--probe-sequence', action='store_true',
                     help='enter bootloader and confirm the image fetch WITHOUT writing (recoverable)')
+    ap.add_argument('--tftp-port', type=int, default=69,
+                    help='TFTP server port the DM850 fetches from (69 needs sudo)')
     a = ap.parse_args()
     if not a.ip:
         raise SystemExit('dry run: drive this tool against sim/fake_dm850.py in a test '
                          '(see sim/test_dm850_writer.py); a real run needs --ip')
     run_write(a.ip, a.image, a.served_name, a.confirm_write, a.sequence_confirmed,
-              a.enter_bootloader, probe=a.probe_sequence)
+              a.enter_bootloader, probe=a.probe_sequence, tftp_port=a.tftp_port)
 
 
 if __name__ == '__main__':
