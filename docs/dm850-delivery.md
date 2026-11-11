@@ -42,8 +42,15 @@ updater, 0x41F1CF–0x42016F):
 | `update bootloader` / `erase webpage` / `update webpage` | **forbidden** (rules 1–2) — never sent |
 | `start tftp client` | TFTP download path (alternative transfer) |
 
-So the delivery sequence is: get the DM850 into bootloader mode → connect 5001 →
-`update image` + DM850I data → `start image` to boot the patched app.
+**The image bytes go over TFTP, not 5001.** `FUN_00420FF0` creates a UDP socket, binds, and
+`getservbyname("tftp")` (port 69); the strings `octet`, `tftp`, `Illegal TFTP operation` and
+`BL_%s_%04X.bcd` confirm it. So the updater runs a **TFTP server**, and the DM850 bootloader
+(as a tftp client, triggered by `start tftp client`/`update image`) **pulls** the image file
+`<model>_%04X.bcd` from it. The 5001 text channel only orchestrates.
+
+So the delivery sequence is: get the DM850 into bootloader mode → connect 5001 → `update
+image` / `start tftp client` → the DM850 pulls `DM850I_<code>.bcd` from our TFTP server →
+`start image` to boot the patched app. Full map: docs/updater-protocol.md.
 
 ## 4. Open: the bootloader-entry trigger
 
@@ -70,15 +77,16 @@ This is the one piece still to pin before a writer can be built; it is a read-on
    first seconds of boot; if it accepts, the bootloader listens at boot (candidate 1) and no
    trigger is needed. Record the boot-window timing. If not, test candidate 3 (`start
    bootloader` over the web/telnet) and candidate 2.
-2. **Transcribe the 5001 protocol:** decompile `FUN_004203E0` (the send/reply primitive) and
-   the `update image` data path in `FUN_004090A0` — the command framing, the data-frame
-   format and size, ACKs, timeouts, retries (the DM850 analogue of the MAIN L/P transcription
-   in main-dump-patch.md §5).
-3. **Build a DM850I-only writer:** a `loader_client`-style tool that enters bootloader mode,
-   sends `update image` + the patched `DM850I_ssdp.flash.bin`, verifies (read-back if the
-   bootloader supports it, else the bCoD CRC + `VI?` stamp `I200805270746`), then `start
-   image`. Frame whitelist: never `update bootloader`/`*webpage`. Gate against `sim/fake_unit`
-   extended for the 5001 text protocol.
+2. **Transcribe the orchestration:** the 5001 command channel is raw ASCII `send()`
+   (`FUN_004203E0`) + reply — already understood. Pin the exact command sequence and the
+   handshake order (`STATE RESET;`/`RESETFLOW`, then `start tftp client`/`update image`) and
+   the TFTP filename/model code the DM850 requests (`<model>_%04X.bcd`), by decompiling the
+   `update image` branch of `FUN_004090A0` and the TFTP server loop (`FUN_00420FF0` ff.).
+3. **Build a DM850I-only writer:** a tool that (a) enters bootloader mode, (b) runs a **TFTP
+   server** serving the patched `DM850I_ssdp.flash.bin` as the requested `.bcd` name, (c)
+   sends the 5001 orchestration commands, (d) verifies (`VI?` stamp `I200805270746` + the bCoD
+   CRC), then `start image`. Command whitelist: never `update bootloader`/`*webpage`. Gate
+   against `sim/fake_unit` extended with a 5001 text responder + a TFTP read-request.
 4. **Recovery procedure:** if a write fails, reconnect to 5001 and re-send `update image`
    (the vendor "Recovering DM800" path). Document the exact steps and the power/UPS checklist,
    same discipline as the MAIN write.
