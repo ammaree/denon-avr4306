@@ -38,13 +38,14 @@ ACCEPTED_SHA256 = {
 
 # ---- TFTP server (RFC 1350, octet, read requests only) -------------------------------------
 class TftpServer(threading.Thread):
-    def __init__(self, filename, data, host='0.0.0.0', port=0):
+    def __init__(self, filename, data, host='0.0.0.0', port=0, probe=False):
         super().__init__(daemon=True)
-        self.filename = filename
+        self.filename = filename        # expected name (for logging only)
         self.data = data
         self.host = host
-        self.port = port
+        self.probe = probe              # probe: log the RRQ, refuse to serve (no write)
         self.served = False
+        self.requested = None           # the filename the DM850 actually asked for
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.bind((host, port))
         self.port = self._sock.getsockname()[1]
@@ -58,12 +59,17 @@ class TftpServer(threading.Thread):
             except socket.timeout:
                 continue
             op = struct.unpack_from('>H', pkt, 0)[0]
-            if op != 1:          # only RRQ
+            if op != 1:          # only RRQ (reads)
                 continue
             name = pkt[2:].split(b'\x00', 1)[0].decode('latin1')
-            if name != self.filename:
-                self._sock.sendto(b'\x00\x05\x00\x01Not found\x00', client)
+            self.requested = name
+            print(f'  [TFTP] read request for {name!r} from {client[0]}')
+            if self.probe:
+                # dry run: confirm the DM850 reached the image fetch, then abort (no write)
+                self._sock.sendto(b'\x00\x05\x00\x00probe: not serving\x00', client)
+                self.served = True   # "the sequence reached the fetch" — not an actual write
                 continue
+            # one image to serve; serve it for whatever name the bootloader requests
             self._send_file(client)
             self.served = True
 
@@ -141,33 +147,64 @@ def accepted_shas():
     return out
 
 
-def run_write(ip, image_path, served_name, confirm, sequence_confirmed, enter_bootloader):
+def _cmd(sh, c):
+    print(f'  5001 > {c}')
+    reply = sh.send_cmd(c)
+    print(f'  5001 < {reply!r}')
+    return reply
+
+
+def run_write(ip, image_path, served_name, confirm, sequence_confirmed, enter_bootloader,
+              probe=False):
     data, sha = pin_image(image_path)
     allowed = accepted_shas()
     if allowed and sha not in allowed:
         raise SystemExit(f'image sha256 {sha[:16]}… is not the patched build or the vendor '
                          f'rollback; refusing to serve it')
-    if not confirm:
-        raise SystemExit('refused: a real write needs --confirm-write (and --sequence-confirmed)')
-    if not sequence_confirmed:
-        raise SystemExit('refused: the command sequence is not yet confirmed on the unit '
-                         '(dm850-delivery.md §4); pass --sequence-confirmed only after the probe')
-    checklist()
-    tftp = TftpServer(served_name, data)
+    if not probe:
+        if not confirm:
+            raise SystemExit('refused: a real write needs --confirm-write')
+        if not sequence_confirmed:
+            raise SystemExit('refused: run --probe-sequence first, then pass --sequence-confirmed')
+        checklist()
+    else:
+        print('PROBE: entering bootloader and confirming the image fetch, WITHOUT writing.')
+    tftp = TftpServer(served_name, data, probe=probe)
     tftp.start()
+    print(f'  [TFTP] server on this host:{tftp.port} (image {len(data)} B, sha {sha[:12]}…)')
     sh = Shell(ip)
+    print(f'  5001 connected; prompt seen')
     try:
         if enter_bootloader:
-            sh.send_cmd('start bootloader')
-            time.sleep(2)
-        sh.send_cmd('update image')          # DM850 pulls `served_name` via TFTP
-        time.sleep(1)
-        sh.send_cmd('start image')           # reboot into the patched application
+            _cmd(sh, 'start bootloader')
+            print('  waiting for the DM850 to reboot into bootloader mode…')
+            time.sleep(8)
+            sh.close()
+            sh = Shell(ip)      # reconnect to the (now-bootloader) 5001 shell
+            print('  reconnected to 5001 after reboot')
+        _cmd(sh, 'update image')             # triggers the DM850 TFTP fetch of the image
+        # wait for the TFTP transfer to complete (or the probe RRQ to land)
+        for _ in range(60):
+            if tftp.served:
+                break
+            time.sleep(1)
     finally:
-        sh.close()
+        try:
+            sh.close()
+        except Exception:
+            pass
         tftp.stop()
-    print(f'write issued (image sha256 {sha[:16]}…, served as {served_name}); '
-          f'verify VI? stamp I200805270746 after reboot')
+    if probe:
+        print(f'PROBE result: DM850 requested {tftp.requested!r} over TFTP '
+              f'({"reached the image fetch — sequence OK" if tftp.served else "no TFTP request seen"}). '
+              f'No write done. Send `start image` or power-cycle to return to the app.')
+    else:
+        print('  booting the patched application…')
+        sh2 = Shell(ip)
+        _cmd(sh2, 'start image')
+        sh2.close()
+        print(f'write issued (image sha {sha[:12]}…, DM850 requested {tftp.requested!r}); '
+              f'verify VI? stamp I200805270746 after reboot')
 
 
 def main():
@@ -179,12 +216,14 @@ def main():
                     help='send `start bootloader` first (per the confirmed entry trigger)')
     ap.add_argument('--confirm-write', action='store_true')
     ap.add_argument('--sequence-confirmed', action='store_true')
+    ap.add_argument('--probe-sequence', action='store_true',
+                    help='enter bootloader and confirm the image fetch WITHOUT writing (recoverable)')
     a = ap.parse_args()
     if not a.ip:
         raise SystemExit('dry run: drive this tool against sim/fake_dm850.py in a test '
                          '(see sim/test_dm850_writer.py); a real run needs --ip')
     run_write(a.ip, a.image, a.served_name, a.confirm_write, a.sequence_confirmed,
-              a.enter_bootloader)
+              a.enter_bootloader, probe=a.probe_sequence)
 
 
 if __name__ == '__main__':
