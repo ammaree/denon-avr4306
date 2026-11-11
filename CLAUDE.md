@@ -1,34 +1,23 @@
 # denon-avr4306 — project context
 
-## Ownership and scope
+## Scope
 
-- All work is done on the owner's own unit: a Denon AVR-4306, MAC 00:05:CD:13:81:94,
-  serial number **<fill in: SN not recorded in this repo>**.
-- Objective: fix a firmware bug that makes the unit lose LAN IP connectivity, and improve
-  the display on/off/dimming and other functionality.
-- All research is done locally, on the owner's own LAN. No third-party equipment is
-  involved.
+- Reverse-engineering and a firmware fix for the **Denon AVR-4306** AV receiver (target
+  firmware 6.0.0.4). The headline result is a fix for the DM850 network module's SSDP crash
+  that drops the receiver's LAN connectivity (`docs/lan-hang.md`).
+- Do all hardware testing on **a unit you own, on your own LAN**. No third-party equipment.
 
 ## Safety
 
-- A hardware-safety-first design is in place: docs/safety-plan.md (hard rules, per-write
-  checklist, write log). Every flash write is gated, verified by read-back and logged.
-- Backups taken from the unit (kept in `dumps/`, git-ignored, copied off the Mac by the
-  owner):
-  - MAIN application flash 0xF00000–0xFFBFFF, equal to vendor 01.00 (2026-11-05).
-  - MAIN settings RAM 0x040C–0x2701 and full RAM (2026-11-05, before the first write).
-  - MAIN resident blocks 0xFFC000–0xFFFFFF, read twice with identical results
-    (2026-11-06).
-- Not yet read from the unit: DM850 flash, SUB, DSP, CPLDs. Their vendor images are
-  in the updater packages, but the unit's own contents have not been dumped.
+- Hardware-safety-first: see `docs/safety-plan.md` (hard rules, per-write checklist, recovery).
+  Every flash write is gated, verified, and recoverable; the DM850B bootloader is never written.
+- The original Denon firmware (vendor updater, extracted images, any on-unit dumps) is Denon
+  copyright and is **git-ignored — never commit it**. The repo distributes only our own patch
+  and tooling (`docs/dm850-delivery.md`, patch-only model).
 
-## Session notes
+## Working notes
 
-- 2026-11-06: Claude Code responses were repeatedly stopped by a safety classifier while
-  writing or reviewing the MAIN writer and the settings-restore code (on Opus 5.5,
-  Fable 5.1 and Sonnet 5.5). Reported to Anthropic via feedback; reference
-  `1d725874-ca39-4736-9c1a-f7bed3fb43ba`. Workaround in use: the owner writes the
-  flash/RAM-write pieces; Claude does analysis, tests, the fake unit, docs and read-only
-  sessions.
-- Run tools that reach the unit with `/usr/bin/python3`: the Homebrew Python is blocked
-  from the LAN (macOS Local Network permission) until allowed in System Settings.
+- Run anything that reaches the unit with the system Python (`/usr/bin/python3`): a package-
+  manager Python may be blocked from the LAN by the OS's Local Network permission until allowed.
+- The DM850 flash is written over TCP 5001 + a TFTP WRQ push on UDP 69 (no sudo needed — see
+  `docs/updater-protocol.md`). It cannot be read back over the network.

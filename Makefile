@@ -8,7 +8,7 @@
 #   make disasm     disassemble MAIN/SUB/DM850 into build/disasm
 #   make clean
 
-SRC ?= $(HOME)/Library/CloudStorage/ProtonDrive-andrem@kss.co.za-folder/FamilyShare/Vendors/Hifi/Denon
+SRC ?= $(HOME)/denon-avr4306-firmware
 UPD ?= $(SRC)/AVR-4306_Upgrade_6_0_0_4.zip
 BUILD := build
 IMAGES := $(BUILD)/images

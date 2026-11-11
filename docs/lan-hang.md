@@ -1,9 +1,20 @@
 # LAN connectivity loss — root cause and firmware target
 
-Status 2026-11-06. The "unit loses LAN IP connectivity" fault (CLAUDE.md objective) was
-diagnosed in the sibling **control-bridge** project in October 2026, on this same unit
-(192.168.1.13). This file records the result and points the firmware work at it; it does
+Status 2026-11-11. The "unit loses LAN IP connectivity" fault (CLAUDE.md objective) was
+diagnosed in a separate network-diagnosis project in October 2026, on this same unit
+(192.0.2.13). This file records the result and points the firmware work at it; it does
 not re-derive it.
+
+## RESOLVED — firmware fix flashed and verified (2026-11-11)
+
+The patched DM850I image (`build/patch/DM850I_ssdp.flash.bin`, SSDP triple guard) was
+flashed to the unit and the fix was verified on the hardware: with the edge router/AP filter
+disabled, 15 Belkin `M-SEARCH` killer packets were sent to 192.0.2.13:1900 and the DM850
+stayed fully responsive (ALIVE on 80/5001/23) past +40 s, where an unpatched unit hangs
+within ~4 s. Flash method and recovery: `docs/dm850-delivery.md`; protocol:
+`docs/updater-protocol.md`. The edge router/AP bridge-filter (below) is now **disabled** — the
+firmware fix replaces the containment. The sections below are retained as the diagnosis
+record; "Current mitigation" and "Firmware target" are now historical.
 
 ## Root cause (confirmed on the unit)
 
@@ -15,20 +26,19 @@ not re-derive it.
   it within ~4 s, while `upnp:rootdevice`, `ssdp:all`, DIAL (`dial-multiscreen-org`),
   MediaRenderer/MediaServer searches and HA's `ssdp:all` scan all leave it alive for
   minutes. So it is this one `ST` value, not SSDP volume and not a follow-up unicast.
-- Real-world source: a lounge **LG OLED** TV's Home Hub scan (every ~5 min) emits the
-  Belkin (WeMo) and DIAL searches. The AVR's drops began the day that TV joined the LAN.
+- Real-world source: a UPnP-scanning smart TV on the LAN's Home Hub scan (every ~5 min) emits the
+  Belkin (WeMo) and DIAL searches. The AVR's drops began once that TV was on the LAN.
 
-Full record, with the wrong turns and the packet captures:
-`~/DevSpace/z-projects/control-bridge/docs/research/2026-10-23-16-avr-network-deaths-spins.md`
-and `…/2026-10-18-12-avr-network-hangs.md`.
+Full record, with the wrong turns and the packet captures: external diagnosis notes, not
+in this repo.
 
-## Current mitigation (network, not firmware)
+## Prior mitigation (network, not firmware) — now disabled
 
-A RouterOS bridge-filter rule on the AVR's AP port drops outbound UDP 1900 to the AVR
-(`hw=no` so the CPU sees it). It keeps the killer packet off the unit. The AVR itself is
-unchanged. This is a containment, not a fix: any new SSDP searcher that reaches the unit
-with that `ST` would hang it again, which is why safety-plan rule 7 (isolated segment)
-stands.
+A bridge-filter rule on the AVR's AP port dropped outbound UDP 1900 to the AVR
+(`hw=no` so the CPU sees it), keeping the killer packet off the unit. It was a containment,
+not a fix. **Disabled 2026-11-11** once the firmware fix was flashed and verified (above);
+the owner chose to leave it off. To restore it as defense-in-depth, re-enable the
+bridge-filter rule on the edge router/AP.
 
 ## Why this is a firmware bug
 
@@ -58,6 +68,10 @@ Image facts already in hand (firmware-package.md §3.4, dm850-firmware.md §3):
   (safety-plan rules 1–2, loader-interface.md §2.8). A DM850-only delivery path is an
   open problem, separate from building the firmware.
 
-**No DM850 flash has been written or dumped on this unit.** Everything above is from the
-vendor image and the external diagnosis. Reproducing or rebuilding the module firmware is
-analysis only until a delivery path and a recovery path for the DM850 are settled.
+**Superseded 2026-11-11:** the delivery and recovery paths were settled and the patched
+DM850I was flashed and verified on the unit (see the "RESOLVED" section at the top, plus
+`docs/dm850-delivery.md` and `docs/updater-protocol.md`). The text above described the
+pre-flash state. Nuance it now carries: the SSDP responder is indeed in the BridgeCo
+platform layer, so no *vendor* release (which rebuilt only Denon's app) ever fixed it — but
+that layer ships inside the DM850I image, and a direct byte-patch of the image (the triple
+guard in `DM850I_ssdp.flash.bin`) fixes it and survives a flash, which is what was done.

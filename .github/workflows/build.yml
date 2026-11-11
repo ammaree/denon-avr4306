@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, macos-13, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Safety gate: the offline tests assert the DM850I-only command whitelist holds and
+      # that a probe writes no data. No artifact is produced if these fail.
+      - name: Tests
+        run: |
+          python -I sim/test_dm850_writer.py
+          python installer/tests/test_flasher.py
+          python installer/tests/test_acquire_patch.py
+
+      - name: Build (PyInstaller)
+        working-directory: installer
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller==6.11.1
+          pyinstaller packaging/avrfix.spec
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: avr4306-fix-${{ matrix.os }}
+          path: |
+            installer/dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          body: |
+            Community AVR-4306 DM850 SSDP-fix installer.
+            Unsigned binaries — see README for the one-time Gatekeeper/SmartScreen step.
+            This ships NO Denon firmware; it patches firmware you already own.

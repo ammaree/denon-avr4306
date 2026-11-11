@@ -262,13 +262,15 @@ MAIN. Audit state:
   known SSDP-crash copies and **no new confirmed bug**; every other variable-length copy
   checks, clamps, or ensures capacity. ARMv5T has no hardware divide (division is a library
   call that handles zero), so there is no divide-by-zero trap class either.
-- **Confirmed + fixed:** the SSDP service/device no-colon crash (the LAN hang), guarded and
-  gated (§1–4), versioned `dm850i-p1`, **not flashed**.
+- **Confirmed + fixed + FLASHED:** the SSDP service/device no-colon crash (the LAN hang),
+  guarded and gated (§1–4), versioned `dm850i-p1`, **flashed & verified on the unit
+  2026-11-11** — the unit survives the Belkin killer packet that hung it (docs/dm850-delivery.md,
+  docs/lan-hang.md). The edge router/AP containment filter has been disabled.
 - **Still suspected, not actionable:** the NicheStack INFRA:HALT class (§3) — third-party
-  object code, confirmable only by deep RE of a known-buggy stack, and **not actionable**
-  because the DM850 has no proven flash delivery or recovery path (the SSDP fix itself is
-  stuck on the same wall). Network-level isolation (control-bridge filter) is the standing
-  mitigation.
+  object code, confirmable only by deep RE of a known-buggy stack. The old blocker (no proven
+  DM850 flash delivery/recovery path) is now **solved** (push via TFTP WRQ + power-cycle
+  recovery, docs/updater-protocol.md), so a future fix here is deliverable; it remains
+  low-priority given it needs deep RE of the stack to even confirm.
 - **Long tail (not done):** per-function naming of the ~12k functions, and per-subsystem
   logic audits of the web server / UPnP control / NicheStack internals — the same
   diminishing-returns tail as MAIN, and lower value here given the no-flash-path constraint.

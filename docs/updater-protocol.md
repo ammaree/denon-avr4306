@@ -14,7 +14,7 @@ project for any further query.
 | **23** | TCP (telnet) | "Check comm." | `VI?` version query |
 | **5000** | TCP | MAIN/SUB/DSP/CPLD update | control lines (`VI?`, `RBUPDATE`→`RBSTART`, `RBNORM`) **and** AA-framed µcom loader frames on the same socket |
 | **5001** | TCP | DM850 bootloader control | **text commands** (ASCII `send()` + reply), §below |
-| **69** | UDP (TFTP) | DM850 image/bootloader **data** | updater is the **TFTP server**; the DM850 (tftp client) pulls the `.bcd` file; "octet" mode |
+| **69** | UDP (TFTP) | DM850 image/bootloader **data** | the DM850 is the **TFTP server** on UDP 69; the host is the client and **pushes** the image with a WRQ (write), octet mode. (`FUN_00420FF0` binds an ephemeral local port with dest = DM850:69 and sends opcode 2/WRQ then opcode 3/DATA — confirmed on the unit 2026-11-11. Earlier "updater is the server; DM850 pulls" was wrong.) |
 | COM1–8 | Serial, 9600–115200 | alternative to 5000 | same AA-framed µcom protocol over `WriteFile`/`ReadFile` |
 
 ## µcom loader (port 5000 / serial) — MAIN, SUB, DSP, CPLD
@@ -28,8 +28,10 @@ power-cycle. This is the path the `loader_client.py` MAIN writer already uses.
 ## DM850 bootloader (port 5001 text + TFTP data)
 
 The DM850 bootloader speaks **ASCII command strings** on TCP 5001 (`FUN_0041FBC0` → raw
-`send()` `FUN_004203E0`, reply checked). The image bytes go over **TFTP** (UDP 69): the
-updater serves the file, the DM850 fetches it by name.
+`send()` `FUN_004203E0`, reply checked). Bootloader prompt is `#` (application prompt is
+`>`); commands are `\r\n`-terminated and answered with `ok`. The image bytes go over **TFTP**
+(UDP 69) as a **push**: the DM850 listens as a TFTP server on 69 and the host writes the file
+to it (WRQ) — it is not a pull.
 
 Command vocabulary (0x41F1CF–0x42016F; UI labels in parentheses):
 
@@ -37,8 +39,8 @@ Command vocabulary (0x41F1CF–0x42016F; UI labels in parentheses):
 |---|---|
 | `start bootloader` | reboot into bootloader mode (Reboot(Bootloader Mode)...) |
 | `start image` | reboot into the application (Reboot(Application Mode)...) |
-| `start tftp client` | DM850 becomes a TFTP client and pulls the image |
-| `update image` | flash DM850I (Updating(image)...) |
+| `start tftp client` | arm the DM850's TFTP receiver on UDP 69 (named "client" but it receives the host's WRQ). On the unit, `update image` already auto-arms it and prints `start tftp client`, so a separate send is not needed |
+| `update image` | flash DM850I (Updating(image)...). On the unit this erases the firmware image and auto-arms the TFTP receiver (prints `erase firmware image` / `start tftp client`); it returns `ok` only **after** the push completes |
 | `update image cne` | flash DM850I, cne variant (Updating(image + cne)...) |
 | `erase image` | erase the DM850I region |
 | `update bootloader` | flash DM850B — **forbidden** (safety rule 1) |
@@ -86,8 +88,10 @@ bootloader listens at boot/reset (dm850-delivery.md §4).
 
 ## What this gives the DM850 delivery
 
-A DM850I-only writer needs: (1) enter the DM850 bootloader (reset window or `start
-bootloader`), (2) a **TFTP server** serving the patched `DM850I_ssdp.flash.bin` as
-`<model>_<code>.bcd`, (3) the 5001 text commands to orchestrate (`update image` /
-`start tftp client`, then `start image`), and (4) the recovery procedure (reconnect + retry).
-It never sends `update bootloader`/`*webpage`. See dm850-delivery.md §5.
+A DM850I-only writer needs: (1) enter the DM850 bootloader (`#` on 5001; `start bootloader`
+from the app, or a power-cycle when the image is invalid), (2) a **TFTP client that pushes
+(WRQ)** the patched `DM850I_ssdp.flash.bin` to the DM850 on UDP 69, (3) the 5001 text
+commands to orchestrate (`erase image` → `update image`, then the push, then `start image`),
+and (4) the recovery procedure (power-cycle back to `#`, then re-run). It never sends
+`update bootloader`/`*webpage`. Built and verified on the unit as `tools/dm850_writer.py` —
+see dm850-delivery.md.

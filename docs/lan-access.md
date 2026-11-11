@@ -48,7 +48,7 @@ and a way to observe live protocol behaviour.
 ## Observed on the real unit (2026-11-05)
 
 Probed at the user's report that "the LAN is not connecting". The unit is at
-**192.168.1.13**, MAC **00:05:CD:13:81:94** (D&M Holdings / Denon — confirms the OUI).
+**192.0.2.13**, MAC **00:05:CD:xx:xx:xx** (D&M Holdings / Denon — confirms the OUI).
 
 - It was reachable: ping 0% loss, ARP resolved, and open TCP ports **80, 5000, 6666,
   8080**. Port 80 served a **GoAhead-Webs** HTML frameset titled `INDEX` (the DM850
@@ -96,7 +96,7 @@ Normal mode only; the same first steps the vendor updater takes.
 
 | Step | Result |
 |---|---|
-| ping ×3 | 0 % loss; ARP 00:05:CD:13:81:94 |
+| ping ×3 | 0 % loss; ARP 00:05:CD:xx:xx:xx |
 | `version`: telnet TCP 23, `VI?` | **connection refused** |
 | `check`: TCP 5000, `C` frame `aa 43 01 ee` | connect accepted; **no reply in 6 s** |
 | ping ×2 afterwards | 0 % loss — DM850 still up |
@@ -192,7 +192,7 @@ off), not an isolated cable. UPS in place. No flash writes.
 | 22:02:07 | `C(1)` on a new connection | answered: unit still in update mode |
 | 22:02:09 | `S(1, sub 1, 0x0400, 0x2701)` (SSManage's frame) | ACK; streamed **RAM 0x0400–0xC3FF** (49,152 B), range ignored |
 | ~22:04 | user power-cycles the unit | |
-| 22:05:04 | ping, ARP, `VI?`, `C` | MAC 00:05:CD:13:81:94; `VI?` answered (preceded by power-on `CVSR 50…` status lines); `C` silent = normal mode |
+| 22:05:04 | ping, ARP, `VI?`, `C` | MAC 00:05:CD:xx:xx:xx; `VI?` answered (preceded by power-on `CVSR 50…` status lines); `C` silent = normal mode |
 
 Results:
 

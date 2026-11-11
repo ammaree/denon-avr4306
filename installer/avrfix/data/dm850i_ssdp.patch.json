@@ -1,0 +1,46 @@
+{
+ "format": "avrfix-bytediff-1",
+ "target": "DM850I",
+ "description": "SSDP crash fix (triple guard) for Denon AVR-4306 DM850I 6.0.0.4. Applies to the vendor DM850I_x image; all bytes here are authored guard/stamp/CRC changes, no Denon original bytes.",
+ "original_sha256": "35ba4b01829b1588abb609463eab0fb97ce8aa4b96a4ec04cd4d3981badfa44e",
+ "patched_sha256": "795925bce4b3f5f53dff4e90e9e92892ea825989b510d2310fa97baf737ce7c1",
+ "size": 2147328,
+ "runs": [
+  [
+   19,
+   "36"
+  ],
+  [
+   44,
+   "41bb258a"
+  ],
+  [
+   60,
+   "8320cfe5"
+  ],
+  [
+   359612,
+   "84f196fe"
+  ],
+  [
+   359714,
+   "84f163fe"
+  ],
+  [
+   1327968,
+   "98f054fb"
+  ],
+  [
+   1952237,
+   "2802d0801b07047047014b1847c046779b0460"
+  ],
+  [
+   1952268,
+   "9d98331c402a"
+  ],
+  [
+   1952275,
+   "d87047014b1847c0468b611360"
+  ]
+ ]
+}

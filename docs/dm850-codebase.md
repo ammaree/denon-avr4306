@@ -46,6 +46,8 @@ the same lift the MAIN codebase gave.
   with no source (docs/dm850-firmware.md), so names/types are recovered, not original.
 - Data (tables, the UPnP/SSDP format strings, the web pages) is partly still typed as code.
 - Naming/typing is the ongoing iteration (docs/dm850-names.tsv, docs/dm850-codeflow.md).
-- There is still **no proven flash delivery or recovery path** for the DM850, so audit
-  findings here cannot be acted on (flashed) yet — the value is understanding and the
-  offline-gated patches (the SSDP guards).
+- Flash delivery and recovery for the DM850 are **solved and proven on the unit**
+  (2026-11-11): push via TFTP WRQ on UDP 69 orchestrated over the 5001 `#` shell, recovery
+  by power-cycle to the bootloader (docs/dm850-delivery.md, docs/updater-protocol.md). The
+  SSDP guards were flashed and verified (docs/dm850-audit.md), so audit findings here are
+  now actionable.

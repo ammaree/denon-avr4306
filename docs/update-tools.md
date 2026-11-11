@@ -65,8 +65,10 @@ Target protocol (MAIN/SUB/DSP side, "Microcomputer side" in error texts):
   `update image cne`, `erase image`, `update webpage`, `erase webpage`, with the
   matching status texts "Updating(bootloader)...", "Updating(image + cne)...". The
   complete **TFTP** error-string set ("Illegal TFTP operation", "Unknown transfer ID",
-  `octet`) shows the PC runs a TFTP server and the DM850 pulls the image with its TFTP
-  client. Image types `DM850I` (image), `DM850B` (bootloader), `DM850D`, plus "cne"
+  `octet`) is the DM850's TFTP server on UDP 69; the PC is the TFTP **client and pushes**
+  the image to it with a WRQ (confirmed on the unit 2026-11-11 — the command is named
+  `start tftp client` but the data flows PC→DM850). Image types `DM850I` (image),
+  `DM850B` (bootloader), `DM850D`, plus "cne"
   (a config/network entity blob, cf. `getCneConfigNumber` in the ARM firmware).
 - Unit discovery: the updater searches the LAN for the receiver by MAC prefix; it
   carries a list of Denon OUIs (`00:05:CD:...`) and "Searching IP = %d.%d.%d.%d".

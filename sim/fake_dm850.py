@@ -1,66 +1,79 @@
 #!/usr/bin/env python3
-"""Fake DM850 bootloader for offline testing of the DM850I writer (tools/dm850_writer.py).
+"""Fake DM850 bootloader for offline testing of tools/dm850_writer.py. Never touches a unit.
 
-Pure simulation — never touches a real unit. It models what docs/updater-protocol.md and
-docs/dm850-delivery.md establish about the DM850 bootloader:
-
-- A line-based shell on TCP 5001: it prints a prompt (`>`), reads `command\r\n`, replies.
-- Known commands: `start bootloader`, `start image`, `start tftp client`, `update image`.
-- On `update image` (or `start tftp client`) it acts as a TFTP client and *pulls* the image
-  file `<name>` from the writer's TFTP server (RFC 1350, octet), storing what it receives so
-  a test can check the bytes delivered.
-- It refuses the forbidden commands so a test can assert the writer never sends them:
-  `update bootloader`, `erase image`, `erase webpage`, `update webpage`.
-
-  python3 -I sim/fake_dm850.py --help
+Models what the updater decompile established (docs/updater-protocol.md, dm850-delivery.md):
+- A line shell on TCP 5001, prompt `#`. Commands `cmd\\r\\n`; known commands reply `ok\\r\\n#`.
+  Known: erase image, update image, start tftp client, start image, start bootloader.
+  Forbidden (refused with `NG`): update bootloader, erase webpage, update webpage.
+- A TFTP SERVER on UDP: it receives the updater's WRQ (opcode 2), ACKs block 0 from a fresh
+  TID, receives DATA (opcode 3) blocks and ACKs them, storing the bytes. If the client aborts
+  with a TFTP ERROR after block-0 (the writer's --probe-wrq), it records that and stores nothing.
 """
-import argparse
-import os
 import socket
 import struct
 import threading
 
-PROMPT = b'>'
-FORBIDDEN = {b'update bootloader', b'erase image', b'erase webpage', b'update webpage'}
+PROMPT = b'#'
+FORBIDDEN = {b'update bootloader', b'erase webpage', b'update webpage', b'erase bootloader'}
+TFTP_WRQ, TFTP_DATA, TFTP_ACK, TFTP_ERR = 2, 3, 4, 5
 
 
-class FakeDm850:
-    def __init__(self, tftp_server=None, image_name=None):
-        self.tftp_server = tftp_server      # (host, port) of the writer's TFTP server
-        self.image_name = image_name        # the .bcd name to request
-        self.received = None                # bytes pulled via TFTP
-        self.commands = []                  # every command line received
-        self.refused = []                   # forbidden commands seen
-        self.started_image = False
+class FakeTftpServer(threading.Thread):
+    def __init__(self, host='127.0.0.1'):
+        super().__init__(daemon=True)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind((host, 0))
+        self.host = host
+        self.port = self.sock.getsockname()[1]
+        self.received = None
+        self.saw_wrq = False
+        self.wrq_name = None
+        self.probe_abort = False
 
-    def tftp_pull(self, name):
-        """RFC 1350 TFTP read request (octet) from self.tftp_server; return the file bytes."""
-        host, port = self.tftp_server
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(5)
-        rrq = b'\x00\x01' + name.encode() + b'\x00octet\x00'
-        s.sendto(rrq, (host, port))
+    def run(self):
+        self.sock.settimeout(8)
+        try:
+            pkt, client = self.sock.recvfrom(2048)
+        except socket.timeout:
+            return
+        if struct.unpack_from('>H', pkt, 0)[0] != TFTP_WRQ:
+            return
+        self.saw_wrq = True
+        self.wrq_name = pkt[2:].split(b'\x00', 1)[0].decode('latin1')
+        tid = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)   # fresh TID, per RFC 1350
+        tid.bind((self.host, 0))
+        tid.settimeout(8)
+        tid.sendto(struct.pack('>HH', TFTP_ACK, 0), client)      # ACK block 0
         data = bytearray()
         expected = 1
         while True:
-            pkt, addr = s.recvfrom(1024)
-            op = struct.unpack_from('>H', pkt, 0)[0]
-            if op == 5:   # ERROR
-                raise RuntimeError('TFTP error: ' + pkt[4:].split(b'\x00')[0].decode('latin1'))
-            if op != 3:   # not DATA
-                raise RuntimeError(f'unexpected TFTP op {op}')
-            blk = struct.unpack_from('>H', pkt, 2)[0]
+            try:
+                p, a = tid.recvfrom(2048)
+            except socket.timeout:
+                break
+            op = struct.unpack_from('>H', p, 0)[0]
+            if op == TFTP_ERR:
+                self.probe_abort = True
+                break
+            if op != TFTP_DATA:
+                continue
+            blk = struct.unpack_from('>H', p, 2)[0]
+            tid.sendto(struct.pack('>HH', TFTP_ACK, blk), a)
             if blk == expected:
-                chunk = pkt[4:]
+                chunk = p[4:]
                 data += chunk
-                s.sendto(b'\x00\x04' + struct.pack('>H', blk), addr)   # ACK
                 expected += 1
                 if len(chunk) < 512:
+                    self.received = bytes(data)
                     break
-            else:
-                s.sendto(b'\x00\x04' + struct.pack('>H', blk), addr)
-        s.close()
-        return bytes(data)
+        tid.close()
+
+
+class FakeShell:
+    def __init__(self):
+        self.commands = []
+        self.refused = []
+        self.started_image = False
 
     def handle(self, conn):
         conn.sendall(PROMPT)
@@ -79,21 +92,12 @@ class FakeDm850:
                 if cmd in FORBIDDEN:
                     self.refused.append(cmd)
                     conn.sendall(b'NG\r\n' + PROMPT)
-                    continue
-                if cmd == b'start image':
-                    self.started_image = True
-                    conn.sendall(b'OK\r\n' + PROMPT)
-                elif cmd in (b'update image', b'start tftp client'):
-                    if self.tftp_server and self.image_name:
-                        try:
-                            self.received = self.tftp_pull(self.image_name)
-                            conn.sendall(b'OK\r\n' + PROMPT)
-                        except Exception as e:
-                            conn.sendall(b'NG ' + str(e).encode() + b'\r\n' + PROMPT)
-                    else:
-                        conn.sendall(b'OK\r\n' + PROMPT)
+                elif cmd == b'start image':
+                    self.started_image = True            # reboot: no reply
+                elif cmd == b'start bootloader':
+                    pass                                   # reboot: no reply
                 else:
-                    conn.sendall(b'OK\r\n' + PROMPT)
+                    conn.sendall(b'ok\r\n' + PROMPT)
 
     def serve(self, host, port):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -106,18 +110,13 @@ class FakeDm850:
             threading.Thread(target=self.handle, args=(conn,), daemon=True).start()
 
 
-def main():
+if __name__ == '__main__':
+    import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=5001)
-    ap.add_argument('--tftp-host', default='127.0.0.1')
-    ap.add_argument('--tftp-port', type=int, default=0)
-    ap.add_argument('--image-name', default='DM850I_0011.bcd')
     a = ap.parse_args()
-    f = FakeDm850((a.tftp_host, a.tftp_port) if a.tftp_port else None, a.image_name)
-    print(f'fake DM850 bootloader on {a.host}:{a.port}')
-    f.serve(a.host, a.port)
-
-
-if __name__ == '__main__':
-    main()
+    t = FakeTftpServer(a.host)
+    t.start()
+    print(f'fake DM850: shell on {a.host}:{a.port}, TFTP server on {a.host}:{t.port}')
+    FakeShell().serve(a.host, a.port)

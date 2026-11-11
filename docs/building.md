@@ -21,7 +21,7 @@ make verify     # check build/images against ref/images.sha256
 make disasm     # disassemble MAIN/SUB/DM850 into build/disasm/
 ```
 
-`SRC` points at the folder holding the tools (default is the ProtonDrive Denon folder);
+`SRC` points at the folder holding the tools (default is the local Denon tools folder);
 `UPD` picks the updater zip. `build/` is git-ignored.
 
 ## What `make images` produces

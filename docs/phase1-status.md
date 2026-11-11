@@ -80,7 +80,7 @@ boot-block dump**; everything up to it is done.
 
 ## Optional: physical device test — attempted (LAN), not the firmware path
 
-The unit is on the LAN (192.168.1.13, Denon MAC). Over LAN only the DM850 is reachable —
+The unit is on the LAN (192.0.2.13, Denon MAC). Over LAN only the DM850 is reachable —
 no path reads MAIN/SUB/DSP flash (lan-access.md), so the boot block cannot come over the
 network. The DM850 also hangs under load (the "LAN not connecting" symptom). The
 boot-block dump therefore requires the bench serial-I/O / JTAG route in re-plan.md §1f.

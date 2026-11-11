@@ -4,7 +4,10 @@ Status 2026-11-11. The long-standing blocker for the SSDP fix (docs/dm850-audit.
 flash a patched **DM850I** without rewriting the web pages (safety-plan rule 2) or touching
 the bootloader (rule 1), and with a **recovery path** if a write fails (the DM850 had "no
 proven recovery"). Analysed from the 6.0.0.4 updater (`AVR-4306_upgrade_6_0_0_4.exe`,
-Ghidra) and the DM850 codebase. **Two feasibility gates are now answered.**
+Ghidra) and the DM850 codebase. **DONE: the patched DM850I was flashed and the SSDP fix
+verified on the unit 2026-11-11 — see the Status section at the end. Sections 1–5 are the
+analysis that led there; the key correction since is that the TFTP transfer is a host→DM850
+PUSH (WRQ), not a pull.**
 
 ## 1. DM850I can be written alone (delivery is safe)
 
@@ -42,15 +45,20 @@ updater, 0x41F1CF–0x42016F):
 | `update bootloader` / `erase webpage` / `update webpage` | **forbidden** (rules 1–2) — never sent |
 | `start tftp client` | TFTP download path (alternative transfer) |
 
-**The image bytes go over TFTP, not 5001.** `FUN_00420FF0` creates a UDP socket, binds, and
-`getservbyname("tftp")` (port 69); the strings `octet`, `tftp`, `Illegal TFTP operation` and
-`BL_%s_%04X.bcd` confirm it. So the updater runs a **TFTP server**, and the DM850 bootloader
-(as a tftp client, triggered by `start tftp client`/`update image`) **pulls** the image file
-`<model>_%04X.bcd` from it. The 5001 text channel only orchestrates.
+**The image bytes go over TFTP, not 5001 — as a PUSH.** `FUN_00420FF0` creates a UDP socket,
+binds an ephemeral local port, and sets its destination to the **DM850 at port 69**
+(`getservbyname("tftp")`); `FUN_004207C0` then emits opcode **2 (WRQ)** + filename + `octet`
+and `FUN_00420A90` emits opcode **3 (DATA)** blocks. So the **DM850 is the TFTP server** on
+UDP 69 and the host is the **client that writes (pushes)** the image to it — not a pull.
+(Earlier revisions of this file said "the updater is the server; the DM850 pulls"; that was
+wrong, corrected by the decompile and confirmed on the unit 2026-11-11.) The 5001 text channel
+orchestrates.
 
-So the delivery sequence is: get the DM850 into bootloader mode → connect 5001 → `update
-image` / `start tftp client` → the DM850 pulls `DM850I_<code>.bcd` from our TFTP server →
-`start image` to boot the patched app. Full map: docs/updater-protocol.md.
+So the delivery sequence is (verified on the unit): bootloader `#` on 5001 → `erase image`
+(`ok`) → `update image` (the unit erases + auto-arms its TFTP receiver, printing
+`start tftp client`) → the host **pushes** `DM850I_<code>.bcd` to the DM850 by TFTP WRQ →
+the unit returns `ok` → `start image` to boot the patched app. Full map:
+docs/updater-protocol.md.
 
 ## 4a. On-unit read-only probes (2026-11-11) — entry resolved
 
@@ -102,26 +110,30 @@ This is the one piece still to pin before a writer can be built; it is a read-on
    handshake order (`STATE RESET;`/`RESETFLOW`, then `start tftp client`/`update image`) and
    the TFTP filename/model code the DM850 requests (`<model>_%04X.bcd`), by decompiling the
    `update image` branch of `FUN_004090A0` and the TFTP server loop (`FUN_00420FF0` ff.).
-3. **Build a DM850I-only writer:** a tool that (a) enters bootloader mode, (b) runs a **TFTP
-   server** serving the patched `DM850I_ssdp.flash.bin` as the requested `.bcd` name, (c)
-   sends the 5001 orchestration commands, (d) verifies (`VI?` stamp `I200805270746` + the bCoD
-   CRC), then `start image`. Command whitelist: never `update bootloader`/`*webpage`. Gate
-   against `sim/fake_unit` extended with a 5001 text responder + a TFTP read-request.
+3. **Build a DM850I-only writer:** a tool that (a) enters bootloader mode, (b) is a **TFTP
+   client that pushes (WRQ)** the patched `DM850I_ssdp.flash.bin` to the DM850 on UDP 69, (c)
+   sends the 5001 orchestration commands, (d) verifies functionally (`VI?` reads `I unknown`
+   for DM850I, so confirm via the SSDP survival test + the bCoD CRC, not the stamp), then
+   `start image`. Command whitelist: never `update bootloader`/`*webpage`. Gate against
+   `sim/fake_dm850.py` (a 5001 `#` responder + a TFTP server that receives the WRQ).
 4. **Recovery procedure:** if a write fails, reconnect to 5001 and re-send `update image`
    (the vendor "Recovering DM800" path). Document the exact steps and the power/UPS checklist,
    same discipline as the MAIN write.
 
-## Status
+## Status — DONE (flashed & verified 2026-11-11)
 
-- **Delivery feasible:** yes — DM850I alone, no web-page/bootloader touch. (was: "open problem")
-- **Recovery:** **confirmed** (reconnect + re-flash via the surviving bootloader). (was: "no
-  proven recovery path")
-- **Writer: built and offline-gated.** `tools/dm850_writer.py` (TFTP server + port-5001 text
-  orchestration) with a hard command whitelist (never `update bootloader`/`*webpage`/`erase`),
-  an image sha256 pin, and `--confirm-write` + `--sequence-confirmed` gates. Tested end to end
-  against `sim/fake_dm850.py` (`sim/test_dm850_writer.py`): the image arrives intact over TFTP,
-  the commands go in order, and every forbidden command is refused.
-- **Remaining before a real write:** (1) the read-only entry-trigger probe on the unit
-  (does 5001 open at boot / after `start bootloader`?), and (2) confirm the exact command
-  order against the unit — then `--sequence-confirmed` may be passed. The hard risk — bricking
-  with no recovery — is already resolved.
+- **Delivery:** done — DM850I alone, no web-page/bootloader touch.
+- **Recovery:** confirmed and exercised — a power-cycle returns the unit to the `#` bootloader
+  (the app image being erased/invalid); the DM850B bootloader is never addressed and survived
+  every cycle. A failed/aborted TFTP leaves the unit hung until a power-cycle.
+- **Writer: `tools/dm850_writer.py`** — port-5001 `#` shell + **TFTP client that pushes (WRQ)**
+  the image to the DM850 on UDP 69, hard command whitelist (`erase image`, `update image`,
+  `start tftp client`, `start bootloader`, `start image` only — never `update bootloader`/
+  `*webpage`), image sha256 pin, `--confirm-write`, and a `--probe-wrq`/`--wrq-only` mode that
+  confirms the unit ACKs the WRQ without writing data. Offline test: `sim/test_dm850_writer.py`
+  against `sim/fake_dm850.py` (now a TFTP server receiving the WRQ).
+- **On the unit:** `erase image`→`ok`, `update image`→auto-arm, WRQ accepted (ACK block 0),
+  all 4195 DATA blocks (2,147,328 B) ACKed, `ok`, `start image` → app booted (80/23/5000 up,
+  5001 `>`). Then verified fixed: survived 15 Belkin `M-SEARCH` killer packets (ALIVE past
+  +40 s). Build identity is confirmed functionally — `VI?` shows `I unknown` for DM850I
+  (placeholder), not the bCoD stamp (docs/VERSIONS.md).

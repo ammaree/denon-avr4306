@@ -1,18 +1,17 @@
 # DM850 multiple simultaneous TCP control sessions — viability
 
 Status 2026-11-06. Investigation only; nothing written to the unit. The goal is to
-let the control-bridge appliance and the DeRemote iOS app both control the AVR at
+let a separate network-diagnosis project's appliance and a phone remote app both control the AVR at
 the same time. Both drive the Denon control protocol over **Telnet TCP 23**
 (CR-terminated ASCII, protocol v4.6a). Today the AVR accepts **one** telnet session.
 
 ## 1. Current behaviour (confirmed)
 
-- control-bridge bench register R02: the AVR "accepts one session only" and holds a
+- The separate project's bench register R02: the AVR "accepts one session only" and holds a
   dead session until its TCP timeout; a second client is refused meanwhile. One run
   saw every telnet connect refused for 8 minutes while the web server still answered
-  (`~/DevSpace/z-projects/control-bridge/docs/11-BENCH.md`,
-  `docs/01-VIABILITY.md` R02, `docs/02-ARCHITECTURE.md`).
-- That is why control-bridge's ADR-0001 makes the bridge the sole owner of the AVR
+  (external diagnosis notes, not in this repo).
+- That is why the separate project's ADR-0001 makes the bridge the sole owner of the AVR
   session and forbids any other client (HA, the app, PuTTY) from touching port 23.
 
 ## 2. Root cause in the firmware (confirmed in the disassembly)
@@ -79,8 +78,9 @@ rewritten, not cave-patched:
    list the event source walks — new shared state with its own locking.
 
 That is a rewrite of the server's lifecycle and new RAM structures, in hand-written
-ARM, patched into a 20-year-old unit with **no proven recovery path** (safety-plan;
-`docs/lan-hang.md`). It also cannot be validated the way the SSDP guards were: the
+ARM, patched into a 20-year-old unit. (Recovery is now proven — power-cycle to the `#`
+bootloader, `docs/dm850-delivery.md` — but a lifecycle rewrite is far riskier than the
+narrow SSDP byte-patch that was flashed.) It also cannot be validated the way the SSDP guards were: the
 replay harness (`tools/dm850/replay_ssdp.py`) exercises one pure function under
 Unicorn, whereas this touches the socket layer, the scheduler and multi-thread timing
 — an offline gate would have to emulate NicheStack and ThreadX, which is far larger
@@ -88,36 +88,36 @@ than anything built here. **High effort, high risk, weak offline assurance.**
 
 ## 4. Recommended alternative: multiplex on the bridge, not the AVR
 
-The same user-visible result — control-bridge and DeRemote both controlling the AVR
+The same user-visible result — the separate project and the phone remote app both controlling the AVR
 at once — is reachable without touching AVR firmware, on a device that *is*
 recoverable.
 
-Run a **Telnet-23 multiplexer on the control-bridge appliance**: a small server that
+Run a **Telnet-23 multiplexer on the separate project's appliance**: a small server that
 holds the one real session to the AVR (which the bridge already owns and parses,
 `avr_denon` module, ADR-0001) and accepts several downstream clients. It serialises
 their commands onto the single AVR session and broadcasts the AVR's events back to all
-of them. DeRemote is then pointed at the bridge's IP on port 23 instead of the AVR.
+of them. The phone remote app is then pointed at the bridge's IP on port 23 instead of the AVR.
 
 Why this is the better path:
 
 - The bridge already maintains the AVR TCP session, parses the protocol, holds state
   and pushes events; the multiplexer is a thin front end over work it already does.
-- It runs on a recoverable device (the ESP32 `cb-blaster` / its host), not the
+- It runs on a recoverable device (the separate project's ESP32 appliance / its host), not the
   unrecoverable AVR. A bug is a reflash, not a brick.
-- It matches control-bridge's existing architecture (ADR-0001, "the bridge owns every
+- It matches the separate project's existing architecture (ADR-0001, "the bridge owns every
   device session"); the AVR keeps its one session, held by the bridge.
 - The command serialisation and event fan-out — the hard parts in §3 — are ordinary
   application code on the bridge, not ARM patches with no test gate.
 
 Caveats:
 
-- DeRemote's core control is telnet; if it also uses the AVR's HTTP/UPnP endpoints for
+- The phone remote app's core control is telnet; if it also uses the AVR's HTTP/UPnP endpoints for
   extras (artwork, browse), those aren't covered by a telnet proxy and would need
   separate handling or would still hit the AVR directly (web server is already
   multi-client).
-- The bridge must present the protocol faithfully enough that DeRemote accepts it
+- The bridge must present the protocol faithfully enough that the phone remote app accepts it
   (event formats, query replies). The bridge already speaks this protocol, so the gap
-  is small, but it needs checking against DeRemote.
+  is small, but it needs checking against the phone remote app.
 
 ## 5. Verdict
 
@@ -127,9 +127,9 @@ Caveats:
   command serialisation, event broadcast) in ARM on a unit with no recovery path and
   no practical offline gate. Disproportionate risk for the goal.
 - **Bridge-side multiplexer: the recommended route.** It delivers simultaneous
-  control-bridge + DeRemote use on recoverable hardware, reusing the session the
+  the separate project + the phone remote app on recoverable hardware, reusing the session the
   bridge already owns, and fits the bridge's design. The work belongs in the
-  control-bridge project, not in this firmware.
+  separate project, not in this firmware.
 
 ## Key addresses (for any future firmware work)
 

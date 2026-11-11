@@ -4,7 +4,7 @@ Per-module firmware patches for the Denon AVR-4306. Versioning scheme: `docs/VER
 "Flashed" means written to the owner's unit and verified; everything else is built and
 gated offline only. Nothing is flashed without the safety-plan.md checklist.
 
-## DM850I p1 — stamp `I200805270746` (not flashed)
+## DM850I p1 — stamp `20080527074601` (flashed & verified 2026-11-11)
 
 Tag `dm850i-p1`. Image `build/patch/DM850I_ssdp.flash.bin` from
 `tools/dm850/apply_ssdp_guard.py` over vendor `DM850I_x` (stamp `I200805270745`).
@@ -19,7 +19,16 @@ Tag `dm850i-p1`. Image `build/patch/DM850I_ssdp.flash.bin` from
 - **Version:** bCoD build stamp `20080527074501` → `20080527074601`; bCoD CRCs recomputed.
 - Gated offline: `tools/dm850/test_ssdp_guard.py` and the Unicorn
   `tools/dm850/replay_ssdp.py`. 58 bytes changed (3 BLs, 2 caves, 2 CRC words) plus the
-  stamp. **Delivery and a DM850 recovery path are unsolved; not flashed.**
+  stamp.
+- **Flashed & verified 2026-11-11.** Delivery and recovery were solved: the DM850
+  bootloader speaks a `#` shell on TCP 5001, and the image is pushed by **TFTP WRQ** to the
+  DM850 (the unit is the TFTP server on UDP 69 — the host writes, it does not pull);
+  sequence `erase image` → `update image` → push → `start image` (`tools/dm850_writer.py`,
+  `docs/dm850-delivery.md`). Recovery is a power-cycle back to the `#` bootloader. On the
+  unit: all 4195 blocks ACKed, unit returned `ok`, app booted, and it then survived 15
+  Belkin `M-SEARCH` killer packets (ALIVE past +40 s) that hang an unpatched unit in ~4 s.
+  Note: `VI?` shows `I unknown` for DM850I (placeholder in the image), so the running build
+  is confirmed functionally, not by `VI?` (`docs/VERSIONS.md`).
 
 ## MAIN — `01.00` on the unit, unversioned patch present (flashed 2026-11-06)
 

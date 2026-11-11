@@ -25,9 +25,9 @@ Read-only by default: only query commands are sent, never a state change (no pow
 volume, input switch). State-changing use is intentionally not implemented here. Point
 it only at your own unit on your own LAN.
 
-Observed on the real unit (2026-11-05)
---------------------------------------
-192.168.1.13 (MAC 00:05:CD:13:81:94, D&M Holdings) answered ping and served a
+Observed on a real unit
+-----------------------
+The unit (a D&M Holdings device, OUI 00:05:CD) answered ping and served a
 GoAhead-Webs frameset on :80 with open TCP :80/:5000/:6666/:8080 — then went fully
 unreachable (no ICMP, no TCP) after a modest amount of probing. The DM850 network
 module hangs under load and drops the whole stack; a full AC power-cycle brings it back.
@@ -37,9 +37,9 @@ the module wedges it. Run this once, gently, right after a power-cycle.
 Usage
 -----
   python3 tools/lan_dump.py --discover
-  python3 tools/lan_dump.py --ip 192.168.1.50            # http + control
-  python3 tools/lan_dump.py --ip 192.168.1.50 --control-port 23
-  python3 tools/lan_dump.py --ip 192.168.1.50 --no-control   # http only
+  python3 tools/lan_dump.py --ip 192.0.2.50            # http + control
+  python3 tools/lan_dump.py --ip 192.0.2.50 --control-port 23
+  python3 tools/lan_dump.py --ip 192.0.2.50 --no-control   # http only
 
 Output lands in dumps/lan-<timestamp>/ (git-ignored). Stdlib only.
 """

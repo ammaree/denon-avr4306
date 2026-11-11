@@ -1,6 +1,6 @@
 # Brief: DM850 firmware reconstruction, audit and fix proposals
 
-For a Cursor session on this repo (`~/DevSpace/z-projects/denon-avr4306`). This is a
+For a Cursor session on this repo. This is a
 pointer brief: the material is already in the repo, so read it first rather than starting
 from scratch. All work is on the owner's own AVR-4306 (see CLAUDE.md). **Analysis only —
 nothing in this brief writes to the unit.** A DM850 flash write needs a delivery path and
@@ -14,8 +14,8 @@ a recovery path that do not yet exist (see §Constraints).
   source build is impossible, why the patch route is the plan, the load map.
 - `docs/firmware-package.md` §3.4 — bCoD header, scatter table, SDRAM map, toolchain.
 - `docs/safety-plan.md` — hard rules; rule 1/2 forbid writing the bootloader and web page.
-- `~/DevSpace/z-projects/control-bridge/docs/research/2026-10-23-16-avr-network-deaths-spins.md`
-  — the packet-level diagnosis (read-only reference; another project).
+- External packet-level diagnosis notes (read-only reference; another project, not in
+  this repo).
 
 ## Inputs on disk (git-ignored, do not commit)
 
@@ -70,11 +70,12 @@ of the firmware**, not re-link it from C. Produce, in order:
 
 ## Constraints
 
-- Analysis only. No DM850 flash is written. No `erase`/`update bootloader`/`update
-  webpage` is ever sent (safety-plan rule 2). The DM850 has **no proven recovery path**
-  if a write fails, and the vendor LAN update rewrites the web pages as a side effect
-  (loader-interface.md §2.8) — so delivery is a separate, unsolved problem, not part of
-  this brief.
+- Analysis only for THIS brief's larger rebuild. (Separately, the SSDP-guard DM850I was
+  flashed & verified 2026-11-11.) No `erase`/`update bootloader`/`update webpage` is ever
+  sent (safety-plan rule 2). Recovery is now **proven** (power-cycle to the `#` bootloader,
+  docs/dm850-delivery.md), and a DM850I-only TFTP-WRQ push avoids the web-page rewrite — so
+  delivery/recovery is no longer the blocker it was, though the larger rebuild remains out of
+  scope for this brief.
 - One processor at a time; MAIN is already patched and must not be touched here.
 - Commit messages terse, **no attribution lines**. Never commit `build/` or `dumps/` or
   any firmware image.

@@ -73,8 +73,8 @@ This is the owner's stated goal (CLAUDE.md). Traced 2026-11-06.
 
 **The dimmer is a 4-level MAIN menu parameter, not a serial command.** Confirmed facts:
 
-- **No serial/network dimmer command exists.** The protocol spec (control-bridge
-  `docs/reference/Denon-AVR-4306-control-protocol-v4.6a.pdf`) has no dimmer/brightness
+- **No serial/network dimmer command exists.** The protocol spec (the Denon AVR-4306
+  control-protocol v4.6a document) has no dimmer/brightness
   command; `SS` is setup-menu navigation, `SY` is remote/panel lock. The recovered token
   table (`docs/control-protocol.md`) likewise has no display token. So adding remote
   dimmer control is **genuinely new functionality**, not exposing something hidden.
@@ -95,7 +95,7 @@ Enhancement design for p1:
 
 1. **Add a remote dimmer command** (a new token, or a `SY`-group sub-command) whose handler
    writes the existing dim-level variable (0–3) and calls the same apply the menu uses, so
-   control-bridge and DeRemote can set brightness and off over TCP/RS-232.
+   a separate project and a phone remote app can set brightness and off over TCP/RS-232.
 2. **Confirm whether level 0 is a true display-OFF** or only darkest; if there is no true
    off, add it. Check whether the level **persists** across standby/power-cycle and, if
    not, store it with the other settings.

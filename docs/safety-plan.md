@@ -70,7 +70,7 @@ During:
 After:
 - [ ] Version screen shows the expected versions (`loader_client.py status`).
 - [ ] Read-only control queries (`loader_client.py status`, `tools/lan_dump.py`) answer as before.
-- [ ] Web UI reachable; MAC unchanged (00:05:CD:13:81:94).
+- [ ] Web UI reachable; MAC unchanged (00:05:CD:xx:xx:xx).
 - [ ] Settings restored (`loader_client.py settings-restore`, or from a `.bid`); write logged below.
 
 ## Stages

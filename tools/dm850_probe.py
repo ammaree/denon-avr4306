@@ -10,8 +10,8 @@ Two read-only checks for the delivery entry trigger (docs/dm850-delivery.md §4)
              optionally send ONE benign line (a newline or an invalid token) to observe the
              prompt/response format. It never sends update/erase/start commands.
 
-  python3 -I tools/dm850_probe.py watch  --ip 192.168.1.13 --seconds 60
-  python3 -I tools/dm850_probe.py prompt --ip 192.168.1.13 [--poke]
+  python3 -I tools/dm850_probe.py watch  --ip 192.0.2.13 --seconds 60
+  python3 -I tools/dm850_probe.py prompt --ip 192.0.2.13 [--poke]
 
 Only connect() and recv() touch the unit (and, with --poke, a single harmless byte). There is
 no path here that sends a bootloader command, so nothing can be erased or written.
@@ -96,7 +96,7 @@ BELKIN_ST = 'urn:Belkin:service:basicevent'
 def ssdp(a):
     """Send the Belkin M-SEARCH (the killer packet) to the AVR's SSDP port. On an unpatched,
     unfiltered unit this hangs the DM850; on a patched unit it is dropped harmlessly. Requires
-    the MikroTik UDP-1900 filter to be LIFTED, or the packet never arrives (false pass)."""
+    any upstream UDP-1900 (SSDP) filter to be LIFTED, or the packet never arrives (false pass)."""
     msearch = (
         'M-SEARCH * HTTP/1.1\r\n'
         'HOST: 239.255.255.250:1900\r\n'
@@ -131,9 +131,47 @@ def alive(a):
     return bool(up)
 
 
+def vi(a):
+    """Query the version string. `VI?` on TCP 23 (telnet), per docs/updater-protocol.md."""
+    s = try_open(a.ip, a.port, 3.0)
+    if not s:
+        print(f'{a.ip}:{a.port} closed')
+        return
+    s.settimeout(3.0)
+    banner = b''
+    try:
+        banner = s.recv(256)
+    except OSError:
+        pass
+    s.sendall(a.q.encode() + b'\r\n')
+    time.sleep(0.6)
+    data = b''
+    try:
+        while True:
+            c = s.recv(512)
+            if not c:
+                break
+            data += c
+    except OSError:
+        pass
+    s.close()
+    if banner:
+        print(f'  banner={banner!r}')
+    print(f'  {a.q!r} -> {data!r}')
+    # pull any I-prefixed stamp (DM850I build stamp, e.g. I200805270746)
+    import re
+    for m in re.findall(rb'I20[0-9]{12}', data):
+        print(f'  DM850I stamp: {m.decode()}')
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest='cmd', required=True)
+    vp = sub.add_parser('vi')
+    vp.add_argument('--ip', required=True)
+    vp.add_argument('--port', type=int, default=23)
+    vp.add_argument('--q', default='VI?')
+    vp.set_defaults(func=vi)
     w = sub.add_parser('watch')
     w.add_argument('--ip', required=True)
     w.add_argument('--seconds', type=int, default=60)

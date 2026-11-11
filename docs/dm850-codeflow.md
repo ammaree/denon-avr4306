@@ -43,7 +43,8 @@ SSDP datagram (UDP 1900)
 
 This is the path that crashes on a service/device `ST` with no version colon
 (docs/dm850-audit.md §1-2); the fix is the guard caves `cave_urn_guard` 0x601CE800 and
-`cave_msearch_guard` 0x601CE820 (built, gated, not flashed).
+`cave_msearch_guard` 0x601CE820 (flashed & verified on the unit 2026-11-11 — survives the
+Belkin killer packet; docs/dm850-delivery.md).
 
 ### Telnet control server (port 23) — single session by design
 

@@ -91,7 +91,7 @@ images in the PDF.
 
 ## Firmware update path
 
-- Windows tool `AVR-4306_upgrade_6_0_0_x.exe`, wired Ethernet, PC fixed at 192.168.0.2/24
+- Windows tool `AVR-4306_upgrade_6_0_0_x.exe`, wired Ethernet, PC fixed at 192.0.2.2/24
   (or DHCP), ~15 min, settings reset afterwards.
 - Versions on hand (updater file dates): 6.0.0.2 (2006-08), 6.0.0.3 (2008-06), 6.0.0.4
   (2008-10). Upgrade manual dated 2008-09-12 names 6.0.0.4 as current for AVR-4306.
