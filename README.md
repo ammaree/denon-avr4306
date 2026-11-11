@@ -12,7 +12,32 @@ it, where an unpatched unit dies within ~4 seconds.
 > patch to firmware **you already own**. **No warranty, use at your own risk.** See
 > [`DISCLAIMER.md`](DISCLAIMER.md).
 
-## For AVR-4306 owners — apply the fix
+## Is this your receiver?
+
+You very likely have this exact bug if:
+
+- It **works, then drops off the network** after anything from minutes to days, and only a full
+  **power-cycle** (off at the wall) brings it back.
+- It dies **on its own** — you aren't touching it when it happens.
+- You have a **smart TV / media player / "cast" device** or other UPnP/DLNA gear on the same
+  network (an LG TV's home-hub scan is a known trigger).
+- Turning off **UPnP on your router**, or putting the AVR on its **own VLAN**, makes it stop.
+
+Under the hood: one SSDP `M-SEARCH` discovery packet with a malformed service name crashes the
+receiver's network module — its whole stack hangs until reboot. Full write-up:
+[docs/lan-hang.md](docs/lan-hang.md).
+
+## Quick fix, no risk (no firmware flashing)
+
+Don't want to touch firmware? Just keep the trigger packet away from the receiver — free,
+reversible, and nothing on the AVR changes. See
+**[docs/no-flash-workaround.md](docs/no-flash-workaround.md)**: block UDP port 1900 to the AVR,
+disable UPnP/SSDP on your router, or isolate the AVR on its own VLAN. Many owners already found
+these by accident; this explains why they work.
+
+The firmware fix below is the **permanent, root-cause** solution for those who want it.
+
+## The permanent fix — patch the firmware (AVR-4306)
 
 1. **Read [`SAFETY.md`](SAFETY.md)** (2 minutes). Short version: it writes only the network
    module; the network drops for ~1 minute while it writes (normal); if interrupted it's
@@ -38,6 +63,18 @@ cd installer
 python3 -m avrfix            # guided command-line
 python3 -m avrfix --gui      # graphical version
 ```
+
+## Other Denon models (3806 / 3808 / 4308 / 4810ci / …)
+
+The same network module (BridgeCo "DM850") and the same crash very likely affect the other
+networked Denon/Marantz receivers of that era — owners of the 3806, 3808, 4308, 4810ci and
+similar report the identical symptom. **But the firmware image is different per model, so the
+patch here does NOT apply to them** — do not flash this on another model. The *approach* is the
+same, and the [no-flash workaround](docs/no-flash-workaround.md) works on any of them right now.
+
+If you can provide a **firmware image / dump from one of these models**, open an issue — porting
+the fix is mostly repeating the analysis in [docs/dm850-audit.md](docs/dm850-audit.md) on that
+image. Contributions welcome.
 
 ## How it works / for developers
 
