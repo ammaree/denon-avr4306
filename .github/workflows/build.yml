@@ -11,7 +11,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-13, windows-2022]
+        # macOS runners are unavailable on this account, so CI builds Windows + Linux only;
+        # the macOS .app is built locally and attached to the release manually.
+        os: [ubuntu-22.04, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
